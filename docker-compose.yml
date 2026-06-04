@@ -1,0 +1,55 @@
+# Local development stack: the FastAPI backend + MongoDB.
+#
+# Usage:
+#   docker compose up --build
+#
+# The API is then available at http://localhost:8000 (docs at /docs) and Mongo
+# at localhost:27017. Application config is provided via environment variables
+# below (mirroring .env.example); adjust as needed.
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: prompt_lab_mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      # Ensure Mongo is accepting connections before the API depends on it.
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: prompt_lab_api
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      APP_NAME: "Prompt Lab - Travel Planner API"
+      ENVIRONMENT: local
+      DEBUG: "true"
+      LOG_LEVEL: INFO
+      API_V1_PREFIX: /api/v1
+      CORS_ALLOW_ORIGINS: "*"
+      # Service name 'mongo' resolves on the compose network.
+      MONGODB_URI: mongodb://mongo:27017
+      MONGODB_DB: prompt_lab
+      # Offline-friendly defaults: stub the gateway and estimate tokens locally.
+      LLM_GATEWAY_STUB_MODE: "true"
+      LLM_GATEWAY_BASE_URL: ""
+      LLM_GATEWAY_API_KEY: ""
+      TOKEN_ESTIMATION_MODE: local
+      SEED_ON_STARTUP: "true"
+
+volumes:
+  mongo_data:
