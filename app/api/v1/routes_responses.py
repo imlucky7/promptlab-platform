@@ -7,12 +7,17 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 
 from app.api.v1.pagination import PaginationParams, build_page, pagination_params
+from app.api.v1.request_logging import log_request
 from app.core.dependencies import ResponsesRepoDep
 from app.core.errors import NotFoundError
+from app.core.logging import get_logger
 from app.models.common import MessageResponse, Page
 from app.models.responses import ResponseRead, ResponseUpdate
 
-router = APIRouter(prefix="/responses", tags=["responses"])
+logger = get_logger(__name__)
+router = APIRouter(
+    prefix="/responses", tags=["responses"], dependencies=[Depends(log_request(logger))]
+)
 
 
 @router.get("", response_model=Page[ResponseRead], summary="List responses")

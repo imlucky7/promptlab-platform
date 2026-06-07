@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Type aliases for the small, well-defined enumerations used in configuration.
 TokenEstimationMode = Literal["gateway", "local"]
@@ -54,7 +54,11 @@ class Settings(BaseSettings):
     debug: bool = Field(default=True, alias="DEBUG")
     api_v1_prefix: str = Field(default="/api/v1", alias="API_V1_PREFIX")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
-    cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"], alias="CORS_ALLOW_ORIGINS")
+    # ``NoDecode`` stops pydantic-settings from JSON-decoding the raw env value
+    # so values like ``*`` or comma-separated lists reach ``_split_cors_origins``.
+    cors_allow_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["*"], alias="CORS_ALLOW_ORIGINS"
+    )
 
     # ---- MongoDB ------------------------------------------------------------
     mongodb_uri: str = Field(default="mongodb://localhost:27017", alias="MONGODB_URI")
@@ -75,8 +79,11 @@ class Settings(BaseSettings):
     local_tokenizer_model: str = Field(default="gpt-4o-mini", alias="LOCAL_TOKENIZER_MODEL")
 
     # ---- Model catalogue ----------------------------------------------------
-    model_catalog: dict[str, ModelConfig] = Field(
-        default_factory=dict, alias="MODEL_CATALOG"
+    # ``NoDecode`` defers JSON parsing to ``_parse_model_catalog`` (which also
+    # supplies the default catalogue when unset). ``validate_default`` ensures
+    # that validator runs even when ``MODEL_CATALOG`` is not provided.
+    model_catalog: Annotated[dict[str, ModelConfig], NoDecode] = Field(
+        default_factory=dict, validate_default=True, alias="MODEL_CATALOG"
     )
 
     # ---- Seeding ------------------------------------------------------------

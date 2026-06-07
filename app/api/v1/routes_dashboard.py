@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from app.api.v1.request_logging import log_request
 from app.core.dependencies import MetricsEngineDep
+from app.core.logging import get_logger
 from app.models.dashboard import DashboardRuns, DashboardSummary
 
-router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+logger = get_logger(__name__)
+router = APIRouter(
+    prefix="/dashboard", tags=["dashboard"], dependencies=[Depends(log_request(logger))]
+)
 
 
 @router.get("/summary", response_model=DashboardSummary, summary="Per-model score summary")

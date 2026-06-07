@@ -7,12 +7,17 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 
 from app.api.v1.pagination import PaginationParams, build_page, pagination_params
+from app.api.v1.request_logging import log_request
 from app.core.dependencies import EvaluationEngineDep, EvaluationsRepoDep
 from app.core.errors import NotFoundError
+from app.core.logging import get_logger
 from app.models.common import MessageResponse, Page
 from app.models.evaluations import EvaluationCreate, EvaluationRead, EvaluationUpdate
 
-router = APIRouter(prefix="/evaluations", tags=["evaluations"])
+logger = get_logger(__name__)
+router = APIRouter(
+    prefix="/evaluations", tags=["evaluations"], dependencies=[Depends(log_request(logger))]
+)
 
 
 @router.get("", response_model=Page[EvaluationRead], summary="List evaluations")

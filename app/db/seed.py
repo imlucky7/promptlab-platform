@@ -1,9 +1,11 @@
 """Idempotent database seeding.
 
 On startup (when ``SEED_ON_STARTUP`` is enabled) the default ``travel``
-use-case template is upserted so the application is immediately usable. The
+use-case templates are upserted so the application is immediately usable. Each
 template defines the input schema (form fields) and the normalized prompt
-template rendered by the template engine.
+template rendered by the template engine. Templates are scoped to a ``model``
+so a single use case can ship multiple LLM-specific prompt variants (e.g. the
+generic default alongside a Claude-tuned variant).
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.logging import get_logger
 from app.db.repositories.use_case_templates_repo import UseCaseTemplatesRepository
+from app.models.use_case_templates import DEFAULT_MODEL
 
 logger = get_logger(__name__)
 
@@ -33,8 +36,9 @@ TRAVEL_INPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
-# Normalized prompt template (system + user sections) using Jinja2 placeholders.
-# The template engine renders this against the structured inputs at build time.
+# Normalized prompt template (system + user sections) using Jinja2 placeholders,
+# tuned for ChatGPT (the default model). The template engine renders this against
+# the structured inputs at build time.
 TRAVEL_PROMPT_TEMPLATE: str = """\
 [SYSTEM]
 You are an expert travel planner. Design a clear, realistic, day-by-day \
@@ -60,15 +64,50 @@ Output format:
 - A brief notes section with budget tips and practical advice.
 """
 
-# Full default template document keyed by ``travel``.
+# Claude-tuned variant of the travel template. It leans on Anthropic prompting
+# conventions (explicit role framing and XML-style sections) while consuming the
+# same structured inputs as the default template.
+TRAVEL_PROMPT_TEMPLATE_CLAUDE: str = """\
+You are Claude, an expert travel planner. Think step by step about travel time, \
+opening hours, and a sensible pace before writing the itinerary. Respect every \
+stated constraint and call out budget-relevant choices.
+
+<trip_request>
+- Origin: {{ origin }}
+- Destination: {{ destination }}
+- Dates: {{ startDate }} to {{ endDate }}
+- Travelers: {{ travelers }}
+{% if budget %}- Budget: {{ budget }}
+{% endif %}{% if preferences %}- Preferences: {{ preferences }}
+{% endif %}{% if constraints %}- Constraints: {{ constraints }}
+{% endif %}</trip_request>
+
+<output_format>
+- A short trip overview (2-3 sentences).
+- One section per day titled "Day N - <theme>".
+- Bullet points for morning, afternoon, and evening.
+- A brief notes section with budget tips and practical advice.
+</output_format>
+"""
+
+# Full default template documents keyed by ``(key, model)``.
 DEFAULT_TEMPLATES: list[dict[str, Any]] = [
     {
         "key": "travel",
-        "name": "Travel Planner",
-        "description": "Design a multi-day trip itinerary",
+        "model": DEFAULT_MODEL,
+        "name": "Travel Planner (ChatGPT)",
+        "description": "Design a multi-day trip itinerary, tuned for ChatGPT",
         "inputSchema": TRAVEL_INPUT_SCHEMA,
         "normalizedPromptTemplate": TRAVEL_PROMPT_TEMPLATE,
-    }
+    },
+    {
+        "key": "travel",
+        "model": "claude",
+        "name": "Travel Planner (Claude)",
+        "description": "Design a multi-day trip itinerary, tuned for Claude",
+        "inputSchema": TRAVEL_INPUT_SCHEMA,
+        "normalizedPromptTemplate": TRAVEL_PROMPT_TEMPLATE_CLAUDE,
+    },
 ]
 
 
@@ -76,7 +115,7 @@ async def seed_default_templates(db: AsyncIOMotorDatabase) -> None:
     """Upsert the default use-case templates.
 
     This is safe to run repeatedly; each template is matched by its unique
-    ``key`` and updated in place.
+    ``(key, model)`` pair and updated in place.
 
     Args:
         db: The active Mongo database handle.
@@ -84,4 +123,8 @@ async def seed_default_templates(db: AsyncIOMotorDatabase) -> None:
     repo = UseCaseTemplatesRepository(db)
     for template in DEFAULT_TEMPLATES:
         await repo.upsert_by_key(template["key"], template)
-        logger.info("Seeded use-case template: %s", template["key"])
+        logger.info(
+            "Seeded use-case template: %s (model=%s)",
+            template["key"],
+            template["model"],
+        )

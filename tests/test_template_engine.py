@@ -17,9 +17,15 @@ class _FakeTemplatesRepo:
     def __init__(self, template: dict[str, Any] | None) -> None:
         self._template = template
 
-    async def get_by_key(self, key: str) -> dict[str, Any] | None:
-        """Return the configured template regardless of key (or None)."""
+    async def get_by_key(
+        self, key: str, model: str = "chatgpt"
+    ) -> dict[str, Any] | None:
+        """Return the configured template regardless of key/model (or None)."""
         return self._template
+
+    async def list_by_key(self, key: str) -> list[dict[str, Any]]:
+        """Return the configured template as a single-item list (or empty)."""
+        return [self._template] if self._template is not None else []
 
 
 @pytest.fixture

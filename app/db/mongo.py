@@ -70,8 +70,17 @@ class MongoConnection:
         """Create indexes that back the documented query/filter patterns."""
         assert self.db is not None  # narrowed by caller; aids type checkers.
 
-        # Unique use-case key so templates are addressable by key.
-        await self.db.use_case_templates.create_index("key", unique=True)
+        # Templates are uniquely addressable by their ``(key, model)`` pair so a
+        # single use case can carry multiple LLM-specific variants. Drop the
+        # legacy single-field unique index on ``key`` if it lingers from an
+        # earlier schema, since it would block additional model variants.
+        try:
+            await self.db.use_case_templates.drop_index("key_1")
+        except Exception:  # noqa: BLE001 - index may simply not exist.
+            pass
+        await self.db.use_case_templates.create_index(
+            [("key", 1), ("model", 1)], unique=True
+        )
         # Common filters across collections.
         await self.db.prompts.create_index("useCaseKey")
         await self.db.prompt_versions.create_index("promptId")
