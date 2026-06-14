@@ -92,21 +92,34 @@ class LLMGatewayClient:
         provider_model_name = model_cfg.provider_model_name if model_cfg else model_key
         gateway_identifier = model_cfg.gateway_model_identifier if model_cfg else model_key
 
+        # Resolve where to send the request. When a direct provider credential is
+        # configured for this model we call the provider's OpenAI-compatible API
+        # directly (using its native model name); otherwise we route through the
+        # unified gateway (using its gateway identifier).
+        direct_target = self._settings.resolve_provider_target(model_cfg)
+        if direct_target is not None:
+            base_url, api_key = direct_target
+            model_id = provider_model_name
+        else:
+            base_url = self._settings.llm_gateway_base_url or ""
+            api_key = self._settings.llm_gateway_api_key
+            model_id = gateway_identifier
+
         # Build an OpenAI-style chat payload.
         payload: dict[str, Any] = {
-            "model": gateway_identifier,
+            "model": model_id,
             "messages": [{"role": "user", "content": prompt_text}],
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
 
-        if self._settings.is_gateway_stubbed:
+        if self._settings.is_model_stubbed(model_key):
             return self._stub_completion(
                 model_key, provider_model_name, gateway_identifier, prompt_text, payload
             )
 
         return await self._remote_completion(
-            model_key, provider_model_name, gateway_identifier, payload
+            model_key, provider_model_name, gateway_identifier, base_url, api_key, payload
         )
 
     async def estimate_tokens(self, text: str, *, model: str) -> int | None:
@@ -146,6 +159,8 @@ class LLMGatewayClient:
         model_key: str,
         provider_model_name: str,
         gateway_identifier: str,
+        base_url: str,
+        api_key: str | None,
         payload: dict[str, Any],
     ) -> LLMResult:
         """Perform the real HTTP call with retry/backoff.
@@ -154,13 +169,15 @@ class LLMGatewayClient:
             model_key: Logical model key.
             provider_model_name: Concrete provider model name.
             gateway_identifier: Gateway-specific identifier.
+            base_url: Base URL of the target (direct provider or unified gateway).
+            api_key: Bearer token for the target, if any.
             payload: The OpenAI-style request payload.
 
         Returns:
             A normalised :class:`LLMResult` (errors captured on the result).
         """
-        url = f"{self._settings.llm_gateway_base_url.rstrip('/')}/chat/completions"  # type: ignore[union-attr]
-        headers = self._auth_headers()
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        headers = self._auth_headers(api_key)
         attempts = self._settings.llm_gateway_max_retries + 1
         last_error: str | None = None
         start = time.perf_counter()
@@ -286,13 +303,18 @@ class LLMGatewayClient:
             raw_response={"stub": True, "model": gateway_identifier},
         )
 
-    def _auth_headers(self) -> dict[str, str]:
-        """Build authorization headers for gateway requests.
+    def _auth_headers(self, api_key: str | None = None) -> dict[str, str]:
+        """Build authorization headers for an outbound request.
+
+        Args:
+            api_key: Bearer token to use. Falls back to the unified gateway key
+                when not provided (e.g. for the ``/tokenize`` endpoint).
 
         Returns:
-            A headers mapping including the bearer token when configured.
+            A headers mapping including the bearer token when one is available.
         """
+        token = api_key if api_key is not None else self._settings.llm_gateway_api_key
         headers = {"Content-Type": "application/json"}
-        if self._settings.llm_gateway_api_key:
-            headers["Authorization"] = f"Bearer {self._settings.llm_gateway_api_key}"
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         return headers

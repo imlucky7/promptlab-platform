@@ -50,13 +50,15 @@ async def list_runs(
     summary="Create and execute a run",
 )
 async def create_run(payload: RunCreate, run_service: RunServiceDep) -> RunWithResponses:
-    """Create a run, build/reuse the prompt, execute models and persist results.
+    """Execute previewed prompts, persisting the prompt, version and run.
 
-    Implements the documented run-creation flow: when no prompt/version is
-    supplied, a prompt and its first version are created automatically.
+    The caller submits one previewed prompt per model (from ``POST /preview``);
+    each variant is sent to its model through the gateway. ``promptId`` and
+    ``promptVersionId`` may be supplied to reuse an existing prompt/version, or
+    omitted to have the system generate fresh ``ObjectId`` references.
 
     Args:
-        payload: The run creation payload.
+        payload: The run creation payload (per-model previewed prompts).
         run_service: Run orchestration service.
 
     Returns:

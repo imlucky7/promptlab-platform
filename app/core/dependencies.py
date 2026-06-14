@@ -202,7 +202,6 @@ def get_run_service(
     runs_repo: RunsRepoDep,
     responses_repo: ResponsesRepoDep,
     evaluations_repo: EvaluationsRepoDep,
-    prompt_builder: PromptBuilderDep,
     execution_engine: ExecutionEngineDep,
     versioning_engine: VersioningEngineDep,
 ) -> RunService:
@@ -213,7 +212,6 @@ def get_run_service(
         runs_repo,
         responses_repo,
         evaluations_repo,
-        prompt_builder,
         execution_engine,
         versioning_engine,
     )

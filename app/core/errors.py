@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -114,13 +115,18 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def _handle_validation_error(
         _: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        """Normalise FastAPI request validation errors."""
+        """Normalise FastAPI request validation errors.
+
+        ``exc.errors()`` may embed non-JSON-serialisable values (e.g. the
+        originating ``ValueError`` under ``ctx`` for custom validators), so the
+        error list is passed through ``jsonable_encoder`` before serialisation.
+        """
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content=_error_payload(
                 "validation_error",
                 "Request validation failed.",
-                {"errors": exc.errors()},
+                {"errors": jsonable_encoder(exc.errors())},
             ),
         )
 

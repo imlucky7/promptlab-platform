@@ -46,31 +46,38 @@ class ExecutionEngine:
     async def execute(
         self,
         run_id: str,
-        prompt_text: str,
-        models: list[str],
+        model_prompts: list[tuple[str, str]],
     ) -> list[dict[str, Any]]:
-        """Execute a prompt against multiple models and persist results.
+        """Execute each model with its own prompt and persist results.
 
         Args:
             run_id: The owning run id.
-            prompt_text: The assembled prompt text to send.
-            models: Logical model keys to execute.
+            model_prompts: A list of ``(model_key, prompt_text)`` pairs. Each
+                model receives its own previewed prompt (e.g. a ChatGPT-tuned
+                prompt and a Claude-tuned prompt), all sent through the gateway.
 
         Returns:
             The list of persisted, serialised response documents.
         """
-        if not models:
+        if not model_prompts:
             return []
 
-        logger.info("Executing run %s across models: %s", run_id, models)
+        logger.info(
+            "Executing run %s across models: %s",
+            run_id,
+            [model_key for model_key, _ in model_prompts],
+        )
 
         # Fire all gateway calls concurrently. Exceptions are returned (not
         # raised) so a single failure does not abort the gather.
-        tasks = [self._gateway.chat_completion(model_key, prompt_text) for model_key in models]
+        tasks = [
+            self._gateway.chat_completion(model_key, prompt_text)
+            for model_key, prompt_text in model_prompts
+        ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         persisted: list[dict[str, Any]] = []
-        for model_key, result in zip(models, results, strict=True):
+        for (model_key, _prompt_text), result in zip(model_prompts, results, strict=True):
             llm_result = self._coerce_result(model_key, result)
             response_doc = self._normalizer.to_response_document(run_id, llm_result)
             saved = await self._responses_repo.create(response_doc)

@@ -87,13 +87,16 @@ async def test_preview_accepts_multiple_models(client: AsyncClient) -> None:
 
 
 async def test_run_creation_persists_prompt_version_and_responses(client: AsyncClient) -> None:
-    """Creating a run with no prompt should auto-create prompt + version + responses."""
+    """A run with no ids should auto-generate prompt + version and per-model responses."""
     resp = await client.post(
         f"{API}/runs",
         json={
             "useCaseKey": "travel",
             "inputs": TRAVEL_INPUTS,
-            "models": ["anthropic", "perplexity"],
+            "prompts": [
+                {"model": "chatgpt", "promptText": "Plan a 10-day Tokyo trip (ChatGPT)."},
+                {"model": "claude", "promptText": "Plan a 10-day Tokyo trip (Claude)."},
+            ],
             "promptTitle": "Japan Family Vacation",
             "versionName": "V1 - baseline",
         },
@@ -101,9 +104,13 @@ async def test_run_creation_persists_prompt_version_and_responses(client: AsyncC
     assert resp.status_code == 201
     body = resp.json()
     run = body["run"]
-    assert run["promptId"]
-    assert run["promptVersionId"]
-    assert len(body["responses"]) == 2
+    # Prompt/version ids are system-generated (24-char hex ObjectIds).
+    assert len(run["promptId"]) == 24
+    assert len(run["promptVersionId"]) == 24
+    assert run["models"] == ["chatgpt", "claude"]
+    # Each model is executed with its own previewed prompt.
+    responses = {r["modelKey"]: r for r in body["responses"]}
+    assert set(responses) == {"chatgpt", "claude"}
     assert all(r["status"] == "success" for r in body["responses"])
 
     # The run is retrievable with its responses (FR-10).
@@ -113,6 +120,39 @@ async def test_run_creation_persists_prompt_version_and_responses(client: AsyncC
     assert len(get_resp.json()["responses"]) == 2
 
 
+async def test_run_honours_supplied_object_ids(client: AsyncClient) -> None:
+    """Supplying valid prompt/version ObjectIds should be honoured on the run."""
+    prompt_id = "507f1f77bcf86cd799439011"
+    version_id = "507f1f77bcf86cd799439012"
+    resp = await client.post(
+        f"{API}/runs",
+        json={
+            "useCaseKey": "travel",
+            "inputs": TRAVEL_INPUTS,
+            "promptId": prompt_id,
+            "promptVersionId": version_id,
+            "prompts": [{"model": "chatgpt", "promptText": "Plan a trip to Tokyo."}],
+        },
+    )
+    assert resp.status_code == 201
+    run = resp.json()["run"]
+    assert run["promptId"] == prompt_id
+    assert run["promptVersionId"] == version_id
+
+
+async def test_run_rejects_invalid_object_id(client: AsyncClient) -> None:
+    """A non-ObjectId promptId should be rejected with a validation error."""
+    resp = await client.post(
+        f"{API}/runs",
+        json={
+            "useCaseKey": "travel",
+            "promptId": "not-an-object-id",
+            "prompts": [{"model": "chatgpt", "promptText": "Plan a trip to Tokyo."}],
+        },
+    )
+    assert resp.status_code == 422
+
+
 async def test_evaluation_upsert_and_dashboard(client: AsyncClient) -> None:
     """Evaluations should upsert and feed the dashboard summary."""
     run_resp = await client.post(
@@ -120,7 +160,7 @@ async def test_evaluation_upsert_and_dashboard(client: AsyncClient) -> None:
         json={
             "useCaseKey": "travel",
             "inputs": TRAVEL_INPUTS,
-            "models": ["anthropic"],
+            "prompts": [{"model": "anthropic", "promptText": "Plan a trip to Tokyo."}],
         },
     )
     run_body = run_resp.json()

@@ -1,9 +1,9 @@
 """Run orchestration service.
 
-Implements the end-to-end "create run" flow described in the PRD (FR-06/FR-07):
-optionally materialise a prompt + version on first run, build (or reuse) the
-prompt text, execute the selected models, persist everything, and keep the
-``lastRunId`` reference up to date.
+Implements the end-to-end "create run" flow: resolve (or generate) the prompt
+and prompt-version ``ObjectId`` references, persist the prompt/version when they
+do not yet exist, execute each previewed prompt against its target model through
+the gateway, persist everything, and keep the ``lastRunId`` reference current.
 
 Keeping this orchestration in a service keeps the route handlers thin.
 """
@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.core.errors import NotFoundError
+from bson import ObjectId
+
 from app.db.repositories.evaluations_repo import EvaluationsRepository
 from app.db.repositories.prompt_versions_repo import PromptVersionsRepository
 from app.db.repositories.prompts_repo import PromptsRepository
@@ -20,7 +21,6 @@ from app.db.repositories.responses_repo import ResponsesRepository
 from app.db.repositories.runs_repo import RunsRepository
 from app.models.runs import RunCreate, RunWithResponses
 from app.services.execution_engine import ExecutionEngine
-from app.services.prompt_builder import PromptBuilderService
 from app.services.versioning_engine import VersioningEngine
 
 
@@ -34,7 +34,6 @@ class RunService:
         runs_repo: RunsRepository,
         responses_repo: ResponsesRepository,
         evaluations_repo: EvaluationsRepository,
-        prompt_builder: PromptBuilderService,
         execution_engine: ExecutionEngine,
         versioning_engine: VersioningEngine,
     ) -> None:
@@ -46,7 +45,6 @@ class RunService:
             runs_repo: Repository for ``runs``.
             responses_repo: Repository for ``responses``.
             evaluations_repo: Repository for ``evaluations``.
-            prompt_builder: Builds prompt text from inputs/templates.
             execution_engine: Executes prompts across models.
             versioning_engine: Creates versions with monotonic numbering.
         """
@@ -55,49 +53,60 @@ class RunService:
         self._runs_repo = runs_repo
         self._responses_repo = responses_repo
         self._evaluations_repo = evaluations_repo
-        self._prompt_builder = prompt_builder
         self._execution_engine = execution_engine
         self._versioning_engine = versioning_engine
 
     async def create_and_execute(self, data: RunCreate) -> RunWithResponses:
-        """Create a run, materialising prompt/version as needed, then execute.
+        """Create a run from the previewed prompts, then execute it.
+
+        The run's ``promptId``/``promptVersionId`` are taken from the request
+        when provided, otherwise generated as fresh MongoDB ``ObjectId`` values.
+        Each previewed prompt is executed against its own model through the
+        gateway.
 
         Args:
-            data: The run creation payload.
+            data: The run creation payload (per-model previewed prompts).
 
         Returns:
             A :class:`RunWithResponses` with the persisted run and responses.
-
-        Raises:
-            NotFoundError: If a provided ``promptVersionId`` does not exist.
         """
-        prompt_id = data.prompt_id
-        prompt_version_id = data.prompt_version_id
+        # 1) Resolve prompt/version ids (honour the request, else system-generate).
+        prompt_id = data.prompt_id or str(ObjectId())
+        prompt_version_id = data.prompt_version_id or str(ObjectId())
 
-        # 1) Resolve the prompt text and (optionally) a reusable version.
-        prompt_text, prompt_id, prompt_version_id = await self._resolve_prompt(
-            data, prompt_id, prompt_version_id
+        models = [item.model for item in data.prompts]
+        prompts_payload = [
+            {"model": item.model, "promptText": item.prompt_text} for item in data.prompts
+        ]
+        primary_text = data.prompts[0].prompt_text
+
+        # 2) Ensure the backing prompt + version documents exist.
+        await self._ensure_prompt(prompt_id, data)
+        await self._ensure_version(
+            prompt_version_id, prompt_id, data, prompts_payload, primary_text
         )
 
-        # 2) Persist the run document.
+        # 3) Persist the run document.
         run_doc = await self._runs_repo.create(
             {
                 "promptVersionId": prompt_version_id,
                 "promptId": prompt_id,
                 "useCaseKey": data.use_case_key,
                 "inputs": data.inputs,
-                "models": data.models,
-                "promptText": prompt_text,
+                "models": models,
+                "prompts": prompts_payload,
+                "promptText": primary_text,
             }
         )
         run_id = run_doc["id"]
 
-        # 3) Execute across models and persist responses + metrics.
-        responses = await self._execution_engine.execute(run_id, prompt_text, data.models)
+        # 4) Execute every previewed prompt against its model and persist results.
+        responses = await self._execution_engine.execute(
+            run_id, [(item.model, item.prompt_text) for item in data.prompts]
+        )
 
-        # 4) Keep the version's lastRunId reference current.
-        if prompt_version_id:
-            await self._versions_repo.patch(prompt_version_id, {"lastRunId": run_id})
+        # 5) Keep the version's lastRunId reference current.
+        await self._versions_repo.patch(prompt_version_id, {"lastRunId": run_id})
 
         return RunWithResponses.model_validate(
             {"run": run_doc, "responses": responses, "evaluations": []}
@@ -121,72 +130,53 @@ class RunService:
             {"run": run_doc, "responses": responses, "evaluations": evaluations}
         )
 
-    async def _resolve_prompt(
-        self,
-        data: RunCreate,
-        prompt_id: str | None,
-        prompt_version_id: str | None,
-    ) -> tuple[str, str | None, str | None]:
-        """Resolve prompt text plus the prompt/version ids to link to the run.
-
-        Implements the three documented cases:
-
-        * Existing version provided -> reuse it.
-        * No prompt/version -> create a prompt and its first version.
-        * Prompt only -> create a new version under that prompt.
+    async def _ensure_prompt(self, prompt_id: str, data: RunCreate) -> None:
+        """Create the prompt document for ``prompt_id`` when it does not exist.
 
         Args:
+            prompt_id: The resolved prompt id (a valid ``ObjectId`` string).
             data: The run creation payload.
-            prompt_id: The provided prompt id, if any.
-            prompt_version_id: The provided version id, if any.
-
-        Returns:
-            A tuple ``(prompt_text, prompt_id, prompt_version_id)``.
-
-        Raises:
-            NotFoundError: If a provided ``promptVersionId`` does not exist.
         """
-        # Case A: an explicit version is provided -> reuse it.
-        if prompt_version_id:
-            version = await self._versions_repo.get(prompt_version_id)
-            if version is None:
-                raise NotFoundError(
-                    f"Prompt version '{prompt_version_id}' not found.",
-                    details={"promptVersionId": prompt_version_id},
-                )
-            prompt_text = data.prompt_text or version.get("promptText") or ""
-            if not prompt_text:
-                prompt_text = await self._prompt_builder.build_prompt(
-                    data.use_case_key, version.get("structuredInputs", data.inputs)
-                )
-            return prompt_text, version.get("promptId", prompt_id), prompt_version_id
-
-        # Build the prompt text from explicit text or from inputs/template.
-        prompt_text = data.prompt_text or await self._prompt_builder.build_prompt(
-            data.use_case_key, data.inputs
+        if await self._prompts_repo.get(prompt_id) is not None:
+            return
+        await self._prompts_repo.create(
+            {
+                "_id": ObjectId(prompt_id),
+                "title": data.prompt_title or "Untitled prompt",
+                "useCaseKey": data.use_case_key,
+                "createdByUserId": None,
+            }
         )
 
-        # Case B: no prompt at all -> create the prompt workspace first.
-        if prompt_id is None:
-            prompt_doc = await self._prompts_repo.create(
-                {
-                    "title": data.prompt_title or "Untitled prompt",
-                    "useCaseKey": data.use_case_key,
-                    "createdByUserId": None,
-                }
-            )
-            prompt_id = prompt_doc["id"]
+    async def _ensure_version(
+        self,
+        version_id: str,
+        prompt_id: str,
+        data: RunCreate,
+        prompts_payload: list[dict[str, Any]],
+        primary_text: str,
+    ) -> None:
+        """Create the prompt-version document for ``version_id`` when missing.
 
-        # Case B/C: create a new version under the (existing or new) prompt.
-        version_doc = await self._versioning_engine.create_version(
+        Args:
+            version_id: The resolved version id (a valid ``ObjectId`` string).
+            prompt_id: The owning prompt id.
+            data: The run creation payload.
+            prompts_payload: The per-model prompts to snapshot on the version.
+            primary_text: The primary prompt text (first variant).
+        """
+        if await self._versions_repo.get(version_id) is not None:
+            return
+        await self._versioning_engine.create_version(
             {
+                "_id": ObjectId(version_id),
                 "promptId": prompt_id,
                 "versionName": data.version_name,
                 "structuredInputs": data.inputs,
-                "promptText": prompt_text,
+                "promptText": primary_text,
+                "prompts": prompts_payload,
                 "createdByUserId": None,
                 "parentVersionId": None,
                 "lastRunId": None,
             }
         )
-        return prompt_text, prompt_id, version_doc["id"]
