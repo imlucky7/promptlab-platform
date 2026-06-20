@@ -13,6 +13,7 @@ providers. This client:
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,6 +24,103 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+_MAX_ERROR_BODY_CHARS = 2000
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    """Best-effort parse of a JSON object response body.
+
+    Args:
+        text: Raw response text.
+
+    Returns:
+        A dict when parsing succeeds, otherwise ``None``.
+    """
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _extract_provider_error_message(body: dict[str, Any]) -> str | None:
+    """Extract a human-readable error message from a provider JSON body.
+
+    Args:
+        body: Parsed JSON response object.
+
+    Returns:
+        The provider message when found, otherwise ``None``.
+    """
+    error = body.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    message = body.get("message")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    return None
+
+
+def _extract_error_detail(response_text: str) -> str | None:
+    """Extract a concise error detail string from an HTTP response body.
+
+    Args:
+        response_text: Raw HTTP response text.
+
+    Returns:
+        A provider message or truncated body text, or ``None`` when empty.
+    """
+    if not response_text.strip():
+        return None
+    body = _parse_json_object(response_text)
+    if body is not None:
+        message = _extract_provider_error_message(body)
+        if message:
+            return message
+    stripped = response_text.strip()
+    if len(stripped) > _MAX_ERROR_BODY_CHARS:
+        return f"{stripped[:_MAX_ERROR_BODY_CHARS]}…"
+    return stripped
+
+
+def _format_gateway_error(exc: Exception) -> str:
+    """Format a gateway exception, preferring the provider response body.
+
+    Args:
+        exc: The exception raised by the HTTP client.
+
+    Returns:
+        A descriptive error string suitable for logs and ``LLMResult.error_message``.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        detail = _extract_error_detail(response.text)
+        if detail:
+            return f"HTTP {response.status_code}: {detail}"
+        return str(exc)
+    return str(exc)
+
+
+def _error_raw_response(response_text: str) -> dict[str, Any]:
+    """Build a persistable raw-response dict from an error body.
+
+    Args:
+        response_text: Raw HTTP response text.
+
+    Returns:
+        Parsed JSON when available, otherwise a wrapper with truncated text.
+    """
+    body = _parse_json_object(response_text)
+    if body is not None:
+        return body
+    if not response_text.strip():
+        return {}
+    stripped = response_text.strip()
+    if len(stripped) > _MAX_ERROR_BODY_CHARS:
+        stripped = f"{stripped[:_MAX_ERROR_BODY_CHARS]}…"
+    return {"errorBody": stripped}
 
 
 @dataclass
@@ -180,6 +278,7 @@ class LLMGatewayClient:
         headers = self._auth_headers(api_key)
         attempts = self._settings.llm_gateway_max_retries + 1
         last_error: str | None = None
+        last_raw_response: dict[str, Any] = {}
         start = time.perf_counter()
 
         for attempt in range(1, attempts + 1):
@@ -194,7 +293,19 @@ class LLMGatewayClient:
                 return self._parse_openai_response(
                     model_key, provider_model_name, gateway_identifier, payload, body, latency_ms
                 )
-            except Exception as exc:  # Network / HTTP / parsing failures.
+            except httpx.HTTPStatusError as exc:
+                last_error = _format_gateway_error(exc)
+                last_raw_response = _error_raw_response(exc.response.text)
+                logger.warning(
+                    "Gateway call failed for model '%s' (attempt %d/%d): %s",
+                    model_key,
+                    attempt,
+                    attempts,
+                    last_error,
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
+            except Exception as exc:  # Network / parsing failures.
                 last_error = str(exc)
                 logger.warning(
                     "Gateway call failed for model '%s' (attempt %d/%d): %s",
@@ -204,7 +315,6 @@ class LLMGatewayClient:
                     exc,
                 )
                 if attempt < attempts:
-                    # Exponential backoff: 0.5s, 1s, 2s, ...
                     await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
 
         latency_ms = int((time.perf_counter() - start) * 1000)
@@ -216,6 +326,7 @@ class LLMGatewayClient:
             error_message=last_error or "Unknown gateway error",
             latency_ms=latency_ms,
             prompt_payload=payload,
+            raw_response=last_raw_response,
         )
 
     def _parse_openai_response(

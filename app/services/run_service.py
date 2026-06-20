@@ -10,10 +10,12 @@ Keeping this orchestration in a service keeps the route handlers thin.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from bson import ObjectId
 
+from app.core.logging import get_logger
 from app.db.repositories.evaluations_repo import EvaluationsRepository
 from app.db.repositories.prompt_versions_repo import PromptVersionsRepository
 from app.db.repositories.prompts_repo import PromptsRepository
@@ -22,6 +24,61 @@ from app.db.repositories.runs_repo import RunsRepository
 from app.models.runs import RunCreate, RunWithResponses
 from app.services.execution_engine import ExecutionEngine
 from app.services.versioning_engine import VersioningEngine
+
+logger = get_logger(__name__)
+_LOG_TEXT_LIMIT = 1000
+
+
+def _truncate_for_log(text: str, limit: int = _LOG_TEXT_LIMIT) -> str:
+    """Clip long text for log output.
+
+    Args:
+        text: The string to truncate.
+        limit: Maximum number of characters to retain.
+
+    Returns:
+        The original text, or a clipped preview with a total-length suffix.
+    """
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}… ({len(text)} chars total)"
+
+
+def _prompt_log_entry(model: str, prompt_text: str) -> dict[str, object]:
+    """Build a log-safe summary for a single model prompt.
+
+    Args:
+        model: Logical model key.
+        prompt_text: Full prompt text sent to the model.
+
+    Returns:
+        A mapping suitable for JSON logging.
+    """
+    return {
+        "model": model,
+        "promptTextLength": len(prompt_text),
+        "promptTextPreview": _truncate_for_log(prompt_text),
+    }
+
+
+def _response_log_entry(response: dict[str, Any]) -> dict[str, object]:
+    """Build a log-safe summary for a persisted response document.
+
+    Args:
+        response: Serialised response document from the repository.
+
+    Returns:
+        A mapping suitable for JSON logging (large fields omitted/truncated).
+    """
+    text = response.get("text") or ""
+    return {
+        "id": response.get("id"),
+        "modelKey": response.get("modelKey"),
+        "status": response.get("status"),
+        "usage": response.get("usage"),
+        "errorMessage": response.get("errorMessage"),
+        "textPreview": _truncate_for_log(text),
+    }
 
 
 class RunService:
@@ -100,11 +157,45 @@ class RunService:
         )
         run_id = run_doc["id"]
 
+        """logger.info(
+            "Run execution request:\n%s",
+            json.dumps(
+                {
+                    "runId": run_id,
+                    "promptId": prompt_id,
+                    "promptVersionId": prompt_version_id,
+                    "useCaseKey": data.use_case_key,
+                    "models": models,
+                    "prompts": [
+                        _prompt_log_entry(item.model, item.prompt_text)
+                        for item in data.prompts
+                    ],
+                },
+                indent=2,
+                default=str,
+                sort_keys=True,
+            ),
+        )
+        """
+
         # 4) Execute every previewed prompt against its model and persist results.
         responses = await self._execution_engine.execute(
             run_id, [(item.model, item.prompt_text) for item in data.prompts]
         )
 
+        """logger.info(
+            "Run execution response:\n%s",
+            json.dumps(
+                {
+                    "runId": run_id,
+                    "responses": [_response_log_entry(item) for item in responses],
+                },
+                indent=2,
+                default=str,
+                sort_keys=True,
+            ),
+        )
+        """
         # 5) Keep the version's lastRunId reference current.
         await self._versions_repo.patch(prompt_version_id, {"lastRunId": run_id})
 

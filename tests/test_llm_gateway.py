@@ -2,8 +2,51 @@
 
 from __future__ import annotations
 
+import httpx
+
 from app.core.config import Settings
-from app.services.llm_gateway_client import LLMGatewayClient
+from app.services.llm_gateway_client import (
+    LLMGatewayClient,
+    _extract_error_detail,
+    _format_gateway_error,
+)
+
+
+def test_extract_error_detail_openai_shape() -> None:
+    """OpenAI-style error JSON should surface the nested message."""
+    body = '{"error":{"message":"You exceeded your current quota","type":"insufficient_quota"}}'
+    assert _extract_error_detail(body) == "You exceeded your current quota"
+
+
+def test_extract_error_detail_anthropic_shape() -> None:
+    """Anthropic-style error JSON should surface the nested message."""
+    body = (
+        '{"error":{"code":"invalid_request_error",'
+        '"message":"Your credit balance is too low to access the Anthropic API.",'
+        '"type":"invalid_request_error"}}'
+    )
+    assert _extract_error_detail(body) == (
+        "Your credit balance is too low to access the Anthropic API."
+    )
+
+
+def test_format_gateway_error_includes_status_and_provider_message() -> None:
+    """HTTPStatusError formatting should include status code and provider detail."""
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/chat/completions")
+    response = httpx.Response(
+        400,
+        request=request,
+        json={
+            "error": {
+                "message": "Your credit balance is too low to access the Anthropic API.",
+                "type": "invalid_request_error",
+            }
+        },
+    )
+    exc = httpx.HTTPStatusError("Bad Request", request=request, response=response)
+    formatted = _format_gateway_error(exc)
+    assert formatted.startswith("HTTP 400:")
+    assert "credit balance is too low" in formatted
 
 
 async def test_stub_completion_is_successful() -> None:

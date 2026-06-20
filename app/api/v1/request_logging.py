@@ -1,8 +1,9 @@
-"""Shared request-logging dependency for v1 API routes.
+"""Shared request/response logging for v1 API routes.
 
-Provides :func:`log_request`, a small dependency factory that each route module
-wires into its router so every incoming request is logged as pretty-printed JSON
-using that module's own logger.
+Provides :func:`log_request`, a dependency factory that each route module wires
+into its router so every incoming request is logged as pretty-printed JSON, and
+:func:`log_response_middleware`, an HTTP middleware that logs outgoing v1
+responses in the same format.
 """
 
 from __future__ import annotations
@@ -10,12 +11,18 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fastapi import Request
+from starlette.responses import Response
 
 # Header names whose values must never be written to logs verbatim.
 _SENSITIVE_HEADERS = frozenset({"authorization", "cookie", "x-api-key", "proxy-authorization"})
 _REDACTED = "***redacted***"
+_DEFAULT_MAX_STRING = 1000
+_DEFAULT_MAX_DEPTH = 6
+
+_response_logger = logging.getLogger("app.api.v1.response")
 
 
 def log_request(logger: logging.Logger) -> Callable[[Request], Awaitable[None]]:
@@ -33,6 +40,106 @@ def log_request(logger: logging.Logger) -> Callable[[Request], Awaitable[None]]:
         await _log_full_request(request, logger)
 
     return _dependency
+
+
+def log_response_middleware(
+    api_prefix: str,
+) -> Callable[[Request, Callable[[Request], Awaitable[Response]]], Awaitable[Response]]:
+    """Build HTTP middleware that logs outgoing v1 API responses as pretty JSON.
+
+    Args:
+        api_prefix: URL prefix for the v1 API (e.g. ``/api/v1``). Requests
+            outside this prefix are passed through without response logging.
+
+    Returns:
+        An async middleware callable suitable for ``app.middleware("http")(...)``.
+    """
+
+    async def _middleware(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        if not request.url.path.startswith(api_prefix):
+            return await call_next(request)
+
+        response = await call_next(request)
+        body = b"".join([chunk async for chunk in response.body_iterator])
+
+        log_payload: dict[str, object] = {
+            "method": request.method,
+            "path": request.url.path,
+            "statusCode": response.status_code,
+            "body": _parse_response_body(body, response.headers.get("content-type")),
+        }
+        _response_logger.info(
+            "Outgoing response:\n%s",
+            json.dumps(
+                truncate_for_log(log_payload),
+                indent=2,
+                default=str,
+                sort_keys=True,
+            ),
+        )
+
+        return Response(
+            content=body,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+        )
+
+    return _middleware
+
+
+def truncate_for_log(
+    value: Any,
+    *,
+    max_string: int = _DEFAULT_MAX_STRING,
+    max_depth: int = _DEFAULT_MAX_DEPTH,
+    _depth: int = 0,
+) -> Any:
+    """Recursively truncate large strings and nested structures for safe logging.
+
+    Args:
+        value: The value to truncate.
+        max_string: Maximum length for string values before clipping.
+        max_depth: Maximum nesting depth before replacing with a placeholder.
+        _depth: Current recursion depth (internal).
+
+    Returns:
+        A log-safe copy of ``value``.
+    """
+    if isinstance(value, str):
+        if len(value) <= max_string:
+            return value
+        return f"{value[:max_string]}… ({len(value)} chars total)"
+
+    if isinstance(value, dict):
+        if _depth >= max_depth:
+            return "<max depth reached>"
+        return {
+            str(key): truncate_for_log(
+                item, max_string=max_string, max_depth=max_depth, _depth=_depth + 1
+            )
+            for key, item in value.items()
+        }
+
+    if isinstance(value, list):
+        if _depth >= max_depth:
+            return "<max depth reached>"
+        return [
+            truncate_for_log(item, max_string=max_string, max_depth=max_depth, _depth=_depth + 1)
+            for item in value
+        ]
+
+    if isinstance(value, tuple):
+        if _depth >= max_depth:
+            return "<max depth reached>"
+        return [
+            truncate_for_log(item, max_string=max_string, max_depth=max_depth, _depth=_depth + 1)
+            for item in value
+        ]
+
+    return value
 
 
 async def _log_full_request(request: Request, logger: logging.Logger) -> None:
@@ -56,7 +163,15 @@ async def _log_full_request(request: Request, logger: logging.Logger) -> None:
         "client": _client_info(request),
         "body": await _read_body(request),
     }
-    logger.info("Incoming request:\n%s", json.dumps(payload, indent=2, default=str, sort_keys=True))
+    logger.info(
+        "Incoming request:\n%s",
+        json.dumps(
+            truncate_for_log(payload),
+            indent=2,
+            default=str,
+            sort_keys=True,
+        ),
+    )
 
 
 def _safe_headers(request: Request) -> dict[str, str]:
@@ -99,8 +214,23 @@ async def _read_body(request: Request) -> object:
         placeholder when the body is not UTF-8 decodable.
     """
     raw = await request.body()
+    return _parse_response_body(raw, request.headers.get("content-type"))
+
+
+def _parse_response_body(raw: bytes, content_type: str | None) -> object:
+    """Decode a response/request body for logging.
+
+    Args:
+        raw: Raw body bytes.
+        content_type: Optional ``Content-Type`` header value.
+
+    Returns:
+        Parsed JSON, decoded text, ``None`` when empty, or a short placeholder.
+    """
     if not raw:
         return None
+    if content_type and "application/json" not in content_type.lower():
+        return f"<{len(raw)} bytes non-JSON body>"
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
