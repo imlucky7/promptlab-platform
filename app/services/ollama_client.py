@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import httpx
@@ -61,16 +62,32 @@ class OllamaClient:
             payload["format"] = response_format
 
         url = f"{self._base_url}/api/generate"
+        start = time.perf_counter()
+        logger.info("Ollama API request url=%s payload=%s", url, json.dumps(payload))
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            latency_ms = int((time.perf_counter() - start) * 1000)
             detail = exc.response.text.strip() or str(exc)
-            logger.warning("Ollama HTTP error: %s", detail[:500])
+            logger.warning(
+                "Ollama HTTP error url=%s latency_ms=%s payload=%s response=%s",
+                url,
+                latency_ms,
+                json.dumps(payload),
+                detail[:500],
+            )
             raise OllamaError(f"Ollama returned HTTP {exc.response.status_code}: {detail}") from exc
         except httpx.RequestError as exc:
-            logger.warning("Ollama request failed: %s", exc)
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            logger.warning(
+                "Ollama request failed url=%s latency_ms=%s payload=%s error=%s",
+                url,
+                latency_ms,
+                json.dumps(payload),
+                exc,
+            )
             raise OllamaError(
                 f"Could not reach Ollama at {self._base_url}. "
                 "Ensure Ollama is running and the model is pulled."
@@ -79,7 +96,23 @@ class OllamaClient:
         try:
             body = response.json()
         except json.JSONDecodeError as exc:
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            logger.warning(
+                "Ollama non-JSON response url=%s latency_ms=%s payload=%s response=%s",
+                url,
+                latency_ms,
+                json.dumps(payload),
+                response.text[:500],
+            )
             raise OllamaError("Ollama returned a non-JSON response.") from exc
+
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            "Ollama API response url=%s latency_ms=%s body=%s",
+            url,
+            latency_ms,
+            json.dumps(body),
+        )
 
         text = body.get("response")
         if not isinstance(text, str):

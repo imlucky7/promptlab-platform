@@ -159,8 +159,8 @@ async def _log_full_request(request: Request, logger: logging.Logger) -> None:
         "path": request.url.path,
         "pathParams": dict(request.path_params),
         "queryParams": dict(request.query_params),
-        "headers": _safe_headers(request),
-        "client": _client_info(request),
+        #"headers": _safe_headers(request),
+        #"client": _client_info(request),
         "body": await _read_body(request),
     }
     logger.info(
