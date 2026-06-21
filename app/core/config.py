@@ -93,6 +93,12 @@ class Settings(BaseSettings):
     )
     perplexity_base_url: str = Field(default="https://api.perplexity.ai", alias="PERPLEXITY_BASE_URL")
 
+    # ---- Ollama (local preview LLM) -----------------------------------------
+    ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
+    ollama_model: str = Field(default="qwen3:8b", alias="OLLAMA_MODEL")
+    ollama_timeout_seconds: float = Field(default=120.0, alias="OLLAMA_TIMEOUT_SECONDS")
+    ollama_preview_stub_mode: bool = Field(default=False, alias="OLLAMA_PREVIEW_STUB_MODE")
+
     # ---- Token estimation ---------------------------------------------------
     token_estimation_mode: TokenEstimationMode = Field(
         default="local", alias="TOKEN_ESTIMATION_MODE"

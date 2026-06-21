@@ -27,6 +27,8 @@ from app.services.evaluation_engine import EvaluationEngine
 from app.services.execution_engine import ExecutionEngine
 from app.services.llm_gateway_client import LLMGatewayClient
 from app.services.metrics_engine import MetricsEngine
+from app.services.ollama_client import OllamaClient
+from app.services.ollama_preview_service import OllamaPreviewService
 from app.services.prompt_builder import PromptBuilderService
 from app.services.response_normalizer import ResponseNormalizer
 from app.services.run_service import RunService
@@ -149,6 +151,22 @@ TemplateEngineDep = Annotated[TemplateEngine, Depends(get_template_engine)]
 TokenEstimatorDep = Annotated[TokenEstimator, Depends(get_token_estimator)]
 SuggestionEngineDep = Annotated[SuggestionEngine, Depends(get_suggestion_engine)]
 ResponseNormalizerDep = Annotated[ResponseNormalizer, Depends(get_response_normalizer)]
+
+
+def get_ollama_client(settings: SettingsDep) -> OllamaClient:
+    """Provide the Ollama HTTP client."""
+    return OllamaClient(settings)
+
+
+def get_ollama_preview_service(
+    ollama: Annotated[OllamaClient, Depends(get_ollama_client)],
+    token_estimator: TokenEstimatorDep,
+) -> OllamaPreviewService:
+    """Provide the Ollama-backed preview service."""
+    return OllamaPreviewService(ollama, token_estimator)
+
+
+OllamaPreviewDep = Annotated[OllamaPreviewService, Depends(get_ollama_preview_service)]
 
 
 def get_prompt_builder(

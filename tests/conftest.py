@@ -32,6 +32,7 @@ def settings() -> Settings:
         environment="local",
         debug=True,
         llm_gateway_stub_mode=True,
+        ollama_preview_stub_mode=True,
         token_estimation_mode="local",
         seed_on_startup=False,
     )

@@ -27,7 +27,7 @@ async def test_health(client: AsyncClient) -> None:
 
 
 async def test_preview_returns_prompt_and_estimates(client: AsyncClient) -> None:
-    """Preview should assemble prompt text and local token estimates."""
+    """Preview should return Ollama-generated prompt text and local token estimates."""
     resp = await client.post(
         f"{API}/preview",
         json={
@@ -42,13 +42,15 @@ async def test_preview_returns_prompt_and_estimates(client: AsyncClient) -> None
     assert len(body["previews"]) == 1
     preview = body["previews"][0]
     assert preview["model"] == "chatgpt"
-    assert "Tokyo" in preview["promptText"]
+    assert preview["templateName"] == "Qwen 3 preview"
+    assert preview["promptText"].strip()
     assert preview["tokenEstimates"]["effectiveMode"] == "local"
     assert preview["tokenEstimates"]["fromLocal"]["inputTokens"] > 0
+    assert isinstance(preview["suggestions"], list)
 
 
-async def test_preview_returns_all_template_variants(client: AsyncClient) -> None:
-    """With no models requested, preview returns every template variant."""
+async def test_preview_defaults_to_single_model(client: AsyncClient) -> None:
+    """With no models requested, preview returns one entry for the default model."""
     resp = await client.post(
         f"{API}/preview",
         json={
@@ -59,14 +61,13 @@ async def test_preview_returns_all_template_variants(client: AsyncClient) -> Non
     )
     assert resp.status_code == 200
     body = resp.json()
-    previews = {p["model"]: p for p in body["previews"]}
-    assert {"chatgpt", "claude"} <= set(previews)
-    assert "Tokyo" in previews["claude"]["promptText"]
-    assert "<trip_request>" in previews["claude"]["promptText"]
+    assert len(body["previews"]) == 1
+    assert body["previews"][0]["model"] == "chatgpt"
+    assert body["previews"][0]["promptText"].strip()
 
 
 async def test_preview_accepts_multiple_models(client: AsyncClient) -> None:
-    """Preview should build a prompt per requested model (ChatGPT + Claude)."""
+    """Preview should return one entry per requested model key."""
     resp = await client.post(
         f"{API}/preview",
         json={
@@ -79,11 +80,8 @@ async def test_preview_accepts_multiple_models(client: AsyncClient) -> None:
     assert resp.status_code == 200
     previews = {p["model"]: p for p in resp.json()["previews"]}
     assert set(previews) == {"chatgpt", "claude"}
-    # Each model renders its own template variant against the same inputs.
-    assert "[SYSTEM]" in previews["chatgpt"]["promptText"]
-    assert "<trip_request>" in previews["claude"]["promptText"]
-    assert "Tokyo" in previews["chatgpt"]["promptText"]
-    assert "Tokyo" in previews["claude"]["promptText"]
+    assert previews["chatgpt"]["promptText"] == previews["claude"]["promptText"]
+    assert previews["chatgpt"]["templateName"] == "Qwen 3 preview"
 
 
 async def test_run_creation_persists_prompt_version_and_responses(client: AsyncClient) -> None:

@@ -14,6 +14,7 @@ SuggestionType = Literal[
     "clarify_output_format",
     "define_persona",
     "add_constraints",
+    "fill_missing_detail",
 ]
 
 
