@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import httpx
 
-from app.core.config import Settings
+from app.core.config import Settings, _default_model_catalog
 from app.services.llm_gateway_client import (
     LLMGatewayClient,
     _extract_error_detail,
     _format_gateway_error,
 )
+from app.services.ollama_client import OllamaClient
 
 
 def test_extract_error_detail_openai_shape() -> None:
@@ -68,6 +69,22 @@ async def test_stub_uses_model_catalog_identifiers() -> None:
     result = await client.chat_completion("perplexity", "hello")
     assert result.provider_model_name == "sonar-pro"
     assert result.gateway_model_identifier == "perplexity/sonar-pro"
+
+
+async def test_qwen3_uses_ollama_stub_path() -> None:
+    """qwen3 completions should route through Ollama (stub mode in tests)."""
+    settings = Settings(
+        ollama_preview_stub_mode=True,
+        model_catalog=_default_model_catalog(),
+    )
+    client = LLMGatewayClient(settings, OllamaClient(settings))
+    result = await client.chat_completion("qwen3", "Plan a trip to Tokyo.")
+    assert result.status == "success"
+    assert result.text == "[STUB Ollama response]"
+    assert result.provider_model_name == "qwen3:8b"
+    assert result.gateway_model_identifier == "ollama/qwen3:8b"
+    assert result.input_tokens > 0
+    assert result.output_tokens > 0
 
 
 async def test_stub_token_estimate_unavailable() -> None:

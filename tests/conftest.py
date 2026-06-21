@@ -15,7 +15,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from mongomock_motor import AsyncMongoMockClient
 
-from app.core.config import Settings
+from app.core.config import Settings, _default_model_catalog
 from app.core.dependencies import get_app_settings, get_db
 from app.db.seed import seed_default_templates
 from app.main import create_app
@@ -35,6 +35,7 @@ def settings() -> Settings:
         ollama_preview_stub_mode=True,
         token_estimation_mode="local",
         seed_on_startup=False,
+        model_catalog=_default_model_catalog(),
     )
 
 

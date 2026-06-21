@@ -74,13 +74,13 @@ async def test_preview_accepts_multiple_models(client: AsyncClient) -> None:
             "useCaseKey": "travel",
             "structuredInputs": TRAVEL_INPUTS,
             "tokenEstimationMode": "local",
-            "models": ["chatgpt", "claude"],
+            "models": ["chatgpt", "qwen3"],
         },
     )
     assert resp.status_code == 200
     previews = {p["model"]: p for p in resp.json()["previews"]}
-    assert set(previews) == {"chatgpt", "claude"}
-    assert previews["chatgpt"]["promptText"] == previews["claude"]["promptText"]
+    assert set(previews) == {"chatgpt", "qwen3"}
+    assert previews["chatgpt"]["promptText"] == previews["qwen3"]["promptText"]
     assert previews["chatgpt"]["templateName"] == "Qwen 3 preview"
 
 
@@ -93,7 +93,7 @@ async def test_run_creation_persists_prompt_version_and_responses(client: AsyncC
             "inputs": TRAVEL_INPUTS,
             "prompts": [
                 {"model": "chatgpt", "promptText": "Plan a 10-day Tokyo trip (ChatGPT)."},
-                {"model": "claude", "promptText": "Plan a 10-day Tokyo trip (Claude)."},
+                {"model": "qwen3", "promptText": "Plan a 10-day Tokyo trip (Qwen3)."},
             ],
             "promptTitle": "Japan Family Vacation",
             "versionName": "V1 - baseline",
@@ -101,18 +101,16 @@ async def test_run_creation_persists_prompt_version_and_responses(client: AsyncC
     )
     assert resp.status_code == 201
     body = resp.json()
-    run = body["run"]
-    # Prompt/version ids are system-generated (24-char hex ObjectIds).
-    assert len(run["promptId"]) == 24
-    assert len(run["promptVersionId"]) == 24
-    assert run["models"] == ["chatgpt", "claude"]
-    # Each model is executed with its own previewed prompt.
+    assert len(body["promptId"]) == 24
+    assert len(body["promptVersionId"]) == 24
+    model_keys = [r["modelKey"] for r in body["responses"]]
+    assert model_keys == ["chatgpt", "qwen3"]
     responses = {r["modelKey"]: r for r in body["responses"]}
-    assert set(responses) == {"chatgpt", "claude"}
+    assert set(responses) == {"chatgpt", "qwen3"}
     assert all(r["status"] == "success" for r in body["responses"])
+    assert responses["qwen3"]["text"] == "[STUB Ollama response]"
 
-    # The run is retrievable with its responses (FR-10).
-    run_id = run["id"]
+    run_id = body["id"]
     get_resp = await client.get(f"{API}/runs/{run_id}")
     assert get_resp.status_code == 200
     assert len(get_resp.json()["responses"]) == 2
@@ -133,9 +131,9 @@ async def test_run_honours_supplied_object_ids(client: AsyncClient) -> None:
         },
     )
     assert resp.status_code == 201
-    run = resp.json()["run"]
-    assert run["promptId"] == prompt_id
-    assert run["promptVersionId"] == version_id
+    body = resp.json()
+    assert body["promptId"] == prompt_id
+    assert body["promptVersionId"] == version_id
 
 
 async def test_run_rejects_invalid_object_id(client: AsyncClient) -> None:
@@ -162,7 +160,7 @@ async def test_evaluation_upsert_and_dashboard(client: AsyncClient) -> None:
         },
     )
     run_body = run_resp.json()
-    run_id = run_body["run"]["id"]
+    run_id = run_body["id"]
     response_id = run_body["responses"][0]["id"]
 
     scores = {

@@ -208,6 +208,18 @@ class Settings(BaseSettings):
             return None
         return base_url, api_key
 
+    def is_ollama_model(self, model_key: str) -> bool:
+        """Whether ``model_key`` is routed through the local Ollama client.
+
+        Args:
+            model_key: Logical model key (e.g. ``"qwen3"``).
+
+        Returns:
+            ``True`` when the catalogue entry declares ``provider: ollama``.
+        """
+        model_cfg = self.get_model_config(model_key)
+        return model_cfg is not None and (model_cfg.provider or "").strip().lower() == "ollama"
+
     def is_model_stubbed(self, model_key: str) -> bool:
         """Whether a specific model should be served by the deterministic stub.
 
@@ -224,6 +236,8 @@ class Settings(BaseSettings):
         """
         if self.llm_gateway_stub_mode:
             return True
+        if self.is_ollama_model(model_key):
+            return False
         if self.resolve_provider_target(self.get_model_config(model_key)) is not None:
             return False
         return not (self.llm_gateway_base_url and self.llm_gateway_api_key)
@@ -246,7 +260,7 @@ def _default_model_catalog() -> dict[str, dict[str, Any]]:
     """Provide the default model catalogue.
 
     The keys mirror the template model keys used by the preview flow
-    (``chatgpt`` and ``claude``) so a preview can be executed via ``/runs``
+    (``chatgpt`` and ``qwen3``) so a preview can be executed via ``/runs``
     without remapping, plus the original ``anthropic`` and ``perplexity``
     aliases. Each entry declares a ``provider`` so the gateway client can call
     the provider's OpenAI-compatible API directly when a key is configured.
@@ -262,12 +276,12 @@ def _default_model_catalog() -> dict[str, dict[str, Any]]:
             "inputCostPer1k": 0.005,
             "outputCostPer1k": 0.015,
         },
-        "claude": {
-            "provider": "anthropic",
-            "providerModelName": "claude-3-5-sonnet-20240620",
-            "gatewayModelIdentifier": "anthropic/claude-3-5-sonnet-20240620",
-            "inputCostPer1k": 0.003,
-            "outputCostPer1k": 0.015,
+        "qwen3": {
+            "provider": "ollama",
+            "providerModelName": "qwen3:8b",
+            "gatewayModelIdentifier": "ollama/qwen3:8b",
+            "inputCostPer1k": 0.0,
+            "outputCostPer1k": 0.0,
         },
         "anthropic": {
             "provider": "anthropic",

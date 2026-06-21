@@ -22,6 +22,7 @@ import httpx
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.services.ollama_client import OllamaClient, OllamaError
 
 logger = get_logger(__name__)
 _MAX_ERROR_BODY_CHARS = 2000
@@ -157,13 +158,15 @@ class LLMResult:
 class LLMGatewayClient:
     """Async client wrapping the LLM gateway with retry and stub support."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, ollama: OllamaClient | None = None) -> None:
         """Initialise the client.
 
         Args:
             settings: Application settings (gateway URL/key, model catalogue).
+            ollama: Optional Ollama client for models with ``provider: ollama``.
         """
         self._settings = settings
+        self._ollama = ollama
 
     async def chat_completion(
         self,
@@ -189,6 +192,11 @@ class LLMGatewayClient:
         model_cfg = self._settings.get_model_config(model_key)
         provider_model_name = model_cfg.provider_model_name if model_cfg else model_key
         gateway_identifier = model_cfg.gateway_model_identifier if model_cfg else model_key
+
+        if self._settings.is_ollama_model(model_key):
+            return await self._ollama_completion(
+                model_key, provider_model_name, gateway_identifier, prompt_text
+            )
 
         # Resolve where to send the request. When a direct provider credential is
         # configured for this model we call the provider's OpenAI-compatible API
@@ -219,6 +227,69 @@ class LLMGatewayClient:
         return await self._remote_completion(
             model_key, provider_model_name, gateway_identifier, base_url, api_key, payload
         )
+
+    async def _ollama_completion(
+        self,
+        model_key: str,
+        provider_model_name: str,
+        gateway_identifier: str,
+        prompt_text: str,
+    ) -> LLMResult:
+        """Execute a completion via the local Ollama client.
+
+        Args:
+            model_key: Logical model key.
+            provider_model_name: Ollama model name from the catalogue.
+            gateway_identifier: Gateway-style identifier for audit logs.
+            prompt_text: The full prompt text to send.
+
+        Returns:
+            A normalised :class:`LLMResult` (errors captured on the result).
+        """
+        payload: dict[str, Any] = {
+            "model": provider_model_name,
+            "prompt": prompt_text,
+        }
+        if self._ollama is None:
+            return LLMResult(
+                model_key=model_key,
+                provider_model_name=provider_model_name,
+                gateway_model_identifier=gateway_identifier,
+                status="error",
+                error_message="Ollama client is not configured",
+                prompt_payload=payload,
+            )
+
+        start = time.perf_counter()
+        try:
+            text = await self._ollama.generate(prompt_text)
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            input_tokens = max(1, len(prompt_text) // 4)
+            output_tokens = max(1, len(text) // 4)
+            return LLMResult(
+                model_key=model_key,
+                provider_model_name=provider_model_name,
+                gateway_model_identifier=gateway_identifier,
+                text=text,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                latency_ms=latency_ms,
+                status="success",
+                prompt_payload=payload,
+                raw_response={"ollama": True, "model": provider_model_name},
+            )
+        except OllamaError as exc:
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            logger.warning("Ollama completion failed for model '%s': %s", model_key, exc)
+            return LLMResult(
+                model_key=model_key,
+                provider_model_name=provider_model_name,
+                gateway_model_identifier=gateway_identifier,
+                status="error",
+                error_message=str(exc),
+                latency_ms=latency_ms,
+                prompt_payload=payload,
+            )
 
     async def estimate_tokens(self, text: str, *, model: str) -> int | None:
         """Estimate input tokens for ``text`` via the gateway when supported.

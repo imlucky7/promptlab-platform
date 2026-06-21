@@ -90,7 +90,8 @@ class OllamaPreviewService:
         """
         trip_context = map_structured_inputs_to_trip_context(structured_inputs)
         context_json = json.dumps(trip_context, indent=2)
-
+        logger.info("User input: %s", context_json )
+        
         draft_prompt = await self._ollama.generate(
             f"Trip context JSON:\n{context_json}\n\nWrite the travel planning prompt.",
             system=_GENERATE_SYSTEM,

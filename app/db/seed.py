@@ -102,9 +102,9 @@ DEFAULT_TEMPLATES: list[dict[str, Any]] = [
     },
     {
         "key": "travel",
-        "model": "claude",
-        "name": "Travel Planner (Claude)",
-        "description": "Design a multi-day trip itinerary, tuned for Claude",
+        "model": "qwen3",
+        "name": "Travel Planner (Qwen3)",
+        "description": "Design a multi-day trip itinerary, tuned for Qwen3",
         "inputSchema": TRAVEL_INPUT_SCHEMA,
         "normalizedPromptTemplate": TRAVEL_PROMPT_TEMPLATE_CLAUDE,
     },

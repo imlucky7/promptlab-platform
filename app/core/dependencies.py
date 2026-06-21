@@ -119,9 +119,17 @@ MetricsRepoDep = Annotated[MetricsRepository, Depends(get_metrics_repo)]
 # --------------------------------------------------------------------------- #
 # Services
 # --------------------------------------------------------------------------- #
-def get_gateway_client(settings: SettingsDep) -> LLMGatewayClient:
+def get_ollama_client(settings: SettingsDep) -> OllamaClient:
+    """Provide the Ollama HTTP client."""
+    return OllamaClient(settings)
+
+
+def get_gateway_client(
+    settings: SettingsDep,
+    ollama: Annotated[OllamaClient, Depends(get_ollama_client)],
+) -> LLMGatewayClient:
     """Provide the LLM gateway client."""
-    return LLMGatewayClient(settings)
+    return LLMGatewayClient(settings, ollama)
 
 
 GatewayDep = Annotated[LLMGatewayClient, Depends(get_gateway_client)]
@@ -151,11 +159,6 @@ TemplateEngineDep = Annotated[TemplateEngine, Depends(get_template_engine)]
 TokenEstimatorDep = Annotated[TokenEstimator, Depends(get_token_estimator)]
 SuggestionEngineDep = Annotated[SuggestionEngine, Depends(get_suggestion_engine)]
 ResponseNormalizerDep = Annotated[ResponseNormalizer, Depends(get_response_normalizer)]
-
-
-def get_ollama_client(settings: SettingsDep) -> OllamaClient:
-    """Provide the Ollama HTTP client."""
-    return OllamaClient(settings)
 
 
 def get_ollama_preview_service(
