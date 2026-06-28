@@ -19,7 +19,6 @@ def test_map_structured_inputs_to_trip_context() -> None:
         {
             "origin": "Hyderabad",
             "destinations": ["Switzerland"],
-            "destination": "Switzerland",
             "startDate": "2026-06-01",
             "endDate": "2026-06-07",
             "adults": 2,
@@ -29,13 +28,16 @@ def test_map_structured_inputs_to_trip_context() -> None:
             "constraints": "avoid long hikes",
         }
     )
-    assert context["destination"] == "Switzerland"
+    assert context["destinations"] == ["Switzerland"]
     assert context["days"] == 7
     assert context["travelStyle"] == "relaxed"
     assert context["interests"] == ["mountains", "lakes", "nature"]
     assert context["family"] == "2 adults and 1 child"
     assert context["origin"] == "Hyderabad"
     assert context["constraints"] == "avoid long hikes"
+    assert "destination" not in context
+    assert "budget" not in context
+    assert "travelers" not in context
 
 
 def test_parse_optimize_response_maps_suggestions() -> None:
@@ -67,6 +69,7 @@ def test_parse_optimize_response_falls_back_to_draft_prompt() -> None:
 
 @pytest.mark.asyncio
 async def test_ollama_client_stub_generate_and_optimize() -> None:
+    """Ollama stub should return deterministic preview outputs."""
     settings = Settings(ollama_preview_stub_mode=True)
     client = OllamaClient(settings)
 

@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
+from app.models.budget import BudgetBreakdown
 from app.models.common import CamelModel, TimestampedModel
 
 ResponseStatus = Literal["success", "error"]
@@ -51,6 +52,7 @@ class ResponseBase(CamelModel):
     usage: UsageInfo = Field(default_factory=UsageInfo)
     status: ResponseStatus = "success"
     error_message: str | None = None
+    budget_breakdown: BudgetBreakdown | None = None
 
 
 class ResponseUpdate(CamelModel):
@@ -60,6 +62,7 @@ class ResponseUpdate(CamelModel):
     status: ResponseStatus | None = None
     error_message: str | None = None
     usage: UsageInfo | None = None
+    budget_breakdown: BudgetBreakdown | None = None
 
 
 class ResponseRead(ResponseBase, TimestampedModel):

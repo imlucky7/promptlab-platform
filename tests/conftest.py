@@ -17,7 +17,6 @@ from mongomock_motor import AsyncMongoMockClient
 
 from app.core.config import Settings, _default_model_catalog
 from app.core.dependencies import get_app_settings, get_db
-from app.db.seed import seed_default_templates
 from app.main import create_app
 
 
@@ -41,14 +40,13 @@ def settings() -> Settings:
 
 @pytest_asyncio.fixture
 async def mock_db() -> AsyncIterator:
-    """Provide a fresh in-memory Mongo database seeded with the travel template.
+    """Provide a fresh in-memory Mongo database.
 
     Yields:
         An async Mongo-compatible database handle.
     """
     client = AsyncMongoMockClient()
     db = client["prompt_lab_test"]
-    await seed_default_templates(db)
     yield db
 
 

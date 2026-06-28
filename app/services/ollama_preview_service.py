@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import date, datetime
 from typing import Any, cast
 
 from app.core.logging import get_logger
 from app.models.preview import PreviewResponse, TemplatePreview
 from app.models.prompt_suggestions import SuggestionItem, SuggestionType
-from app.models.use_case_templates import DEFAULT_MODEL
 from app.services.ollama_client import OllamaClient, OllamaError
 from app.services.token_estimator import TokenEstimator
 
 logger = get_logger(__name__)
+
+DEFAULT_PREVIEW_MODEL = "chatgpt"
 
 _GENERATE_SYSTEM = (
     "You are an expert travel prompt engineer. Given structured trip details as JSON, "
@@ -74,24 +76,11 @@ class OllamaPreviewService:
         models: list[str] | None = None,
         token_estimation_mode: str = "default",
     ) -> PreviewResponse:
-        """Generate an optimized prompt and suggestions via Ollama.
-
-        Args:
-            use_case_key: Use-case key (echoed in the response).
-            structured_inputs: Trip inputs from the workspace form.
-            models: Model keys to attach to each preview entry.
-            token_estimation_mode: Token estimation override.
-
-        Returns:
-            A :class:`PreviewResponse` with one preview per requested model.
-
-        Raises:
-            OllamaError: When Ollama is unreachable or returns invalid data.
-        """
+        """Generate an optimized prompt and suggestions via Ollama."""
+        started = time.perf_counter()
         trip_context = map_structured_inputs_to_trip_context(structured_inputs)
         context_json = json.dumps(trip_context, indent=2)
-        logger.info("User input: %s", context_json )
-        
+
         draft_prompt = await self._ollama.generate(
             f"Trip context JSON:\n{context_json}\n\nWrite the travel planning prompt.",
             system=_GENERATE_SYSTEM,
@@ -112,7 +101,7 @@ class OllamaPreviewService:
             optimized_prompt, mode_override=token_estimation_mode
         )
 
-        model_keys = models if models else [DEFAULT_MODEL]
+        model_keys = models if models else [DEFAULT_PREVIEW_MODEL]
         previews = [
             TemplatePreview(
                 model=model,
@@ -124,10 +113,12 @@ class OllamaPreviewService:
             for model in model_keys
         ]
 
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
         return PreviewResponse(
             use_case_key=use_case_key,
             structured_inputs=structured_inputs,
             previews=previews,
+            latency_ms=latency_ms,
         )
 
 
@@ -135,25 +126,20 @@ def map_structured_inputs_to_trip_context(
     structured_inputs: dict[str, Any],
 ) -> dict[str, Any]:
     """Map workspace ``structuredInputs`` to the trip context sent to Ollama."""
-    destination = _resolve_destination(structured_inputs)
+    destinations = _resolve_destinations(structured_inputs)
     days = _compute_trip_days(
         structured_inputs.get("startDate"),
         structured_inputs.get("endDate"),
     )
-    travel_style = (
-        str(structured_inputs.get("budgetLevel") or structured_inputs.get("budget") or "")
-        .strip()
-        or None
-    )
+    travel_style = str(structured_inputs.get("budgetLevel") or "").strip() or None
     interests = _parse_interests(structured_inputs.get("preferences"))
     family = _format_family(
         structured_inputs.get("adults"),
         structured_inputs.get("children"),
-        structured_inputs.get("travelers"),
     )
 
     context: dict[str, Any] = {
-        "destination": destination,
+        "destinations": destinations,
         "days": days,
         "travelStyle": travel_style,
         "interests": interests,
@@ -182,14 +168,11 @@ def map_structured_inputs_to_trip_context(
     return context
 
 
-def _resolve_destination(structured_inputs: dict[str, Any]) -> str | None:
+def _resolve_destinations(structured_inputs: dict[str, Any]) -> list[str]:
     destinations = structured_inputs.get("destinations")
     if isinstance(destinations, list):
-        joined = ", ".join(str(item).strip() for item in destinations if str(item).strip())
-        if joined:
-            return joined
-    destination = str(structured_inputs.get("destination") or "").strip()
-    return destination or None
+        return [str(item).strip() for item in destinations if str(item).strip()]
+    return []
 
 
 def _compute_trip_days(start: Any, end: Any) -> int | None:
@@ -220,15 +203,9 @@ def _parse_interests(preferences: Any) -> list[str]:
     return [part.strip() for part in str(preferences).split(",") if part.strip()]
 
 
-def _format_family(adults: Any, children: Any, travelers: Any) -> str | None:
+def _format_family(adults: Any, children: Any) -> str | None:
     adult_count = _coerce_count(adults)
     child_count = _coerce_count(children)
-    if adult_count is None and child_count is None and travelers is not None:
-        try:
-            total = int(travelers)
-        except (TypeError, ValueError):
-            return None
-        return f"{total} traveler{'s' if total != 1 else ''}"
 
     parts: list[str] = []
     if adult_count and adult_count > 0:

@@ -46,29 +46,20 @@ class RunBase(CamelModel):
 class RunCreate(RunBase):
     """Payload for creating + executing a run (``POST /runs``).
 
-    The run is anchored to a prompt and prompt version. Their ids may be
-    supplied by the caller (to reuse an existing prompt/version) or omitted, in
-    which case the system generates fresh MongoDB ``ObjectId`` values.
-
     Attributes:
-        prompt_id: Optional prompt id (``ObjectId``). Generated when omitted.
-        prompt_version_id: Optional prompt version id (``ObjectId``). Generated
-            when omitted.
-        prompts: The previewed prompts to execute, one per model. The preview
-            endpoint can produce a variant per LLM (e.g. ChatGPT and Claude);
-            each variant is sent to its own model through the gateway.
-        prompt_title: Optional title for an auto-created prompt.
-        version_name: Optional label for an auto-created prompt version.
+        model: Logical model key to execute (e.g. ``"qwen3"`` or ``"chatgpt"``).
+        prompt_text: Previewed prompt text from ``POST /preview``.
+        prompt_id: Optional prompt id reference when linking to a saved prompt.
+        prompt_version_id: Optional prompt version id reference.
     """
 
+    model: str = Field(examples=["qwen3", "chatgpt"])
+    prompt_text: str = Field(
+        min_length=1,
+        description="Previewed prompt text to execute.",
+    )
     prompt_id: str | None = None
     prompt_version_id: str | None = None
-    prompts: list[RunPrompt] = Field(
-        min_length=1,
-        description="Previewed prompts to execute, one per target model.",
-    )
-    prompt_title: str | None = None
-    version_name: str | None = None
 
     @field_validator("prompt_id", "prompt_version_id")
     @classmethod

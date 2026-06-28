@@ -109,3 +109,6 @@ class PreviewResponse(CamelModel):
     use_case_key: str
     structured_inputs: dict[str, Any]
     previews: list[TemplatePreview] = Field(default_factory=list)
+    latency_ms: float = Field(
+        description="Total wall-clock time for the preview request in milliseconds."
+    )

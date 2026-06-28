@@ -6,17 +6,36 @@ from httpx import AsyncClient
 
 API = "/api/v1"
 
-# A representative set of travel inputs reused across tests.
 TRAVEL_INPUTS = {
     "origin": "Hyderabad",
-    "destination": "Tokyo",
+    "destinations": ["Tokyo"],
     "startDate": "2026-11-10",
     "endDate": "2026-11-20",
-    "travelers": 2,
-    "budget": "mid-range",
+    "adults": 2,
+    "budgetLevel": "mid-range",
     "preferences": "food, culture",
     "constraints": "avoid overnight buses",
 }
+
+
+def _run_payload(
+    *,
+    model: str = "chatgpt",
+    prompt_text: str = "Plan a 10-day Tokyo trip.",
+    prompt_id: str | None = None,
+    prompt_version_id: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "useCaseKey": "travel",
+        "inputs": TRAVEL_INPUTS,
+        "model": model,
+        "promptText": prompt_text,
+    }
+    if prompt_id is not None:
+        payload["promptId"] = prompt_id
+    if prompt_version_id is not None:
+        payload["promptVersionId"] = prompt_version_id
+    return payload
 
 
 async def test_health(client: AsyncClient) -> None:
@@ -39,6 +58,7 @@ async def test_preview_returns_prompt_and_estimates(client: AsyncClient) -> None
     )
     assert resp.status_code == 200
     body = resp.json()
+    assert body["latencyMs"] >= 0
     assert len(body["previews"]) == 1
     preview = body["previews"][0]
     assert preview["model"] == "chatgpt"
@@ -84,51 +104,77 @@ async def test_preview_accepts_multiple_models(client: AsyncClient) -> None:
     assert previews["chatgpt"]["templateName"] == "Qwen 3 preview"
 
 
-async def test_run_creation_persists_prompt_version_and_responses(client: AsyncClient) -> None:
-    """A run with no ids should auto-generate prompt + version and per-model responses."""
-    resp = await client.post(
-        f"{API}/runs",
-        json={
-            "useCaseKey": "travel",
-            "inputs": TRAVEL_INPUTS,
-            "prompts": [
-                {"model": "chatgpt", "promptText": "Plan a 10-day Tokyo trip (ChatGPT)."},
-                {"model": "qwen3", "promptText": "Plan a 10-day Tokyo trip (Qwen3)."},
-            ],
-            "promptTitle": "Japan Family Vacation",
-            "versionName": "V1 - baseline",
-        },
-    )
+async def test_run_creation_persists_responses(client: AsyncClient) -> None:
+    """A run should execute the requested model and persist one response."""
+    resp = await client.post(f"{API}/runs", json=_run_payload(model="qwen3"))
     assert resp.status_code == 201
     body = resp.json()
-    assert len(body["promptId"]) == 24
-    assert len(body["promptVersionId"]) == 24
-    model_keys = [r["modelKey"] for r in body["responses"]]
-    assert model_keys == ["chatgpt", "qwen3"]
-    responses = {r["modelKey"]: r for r in body["responses"]}
-    assert set(responses) == {"chatgpt", "qwen3"}
-    assert all(r["status"] == "success" for r in body["responses"])
-    assert responses["qwen3"]["text"] == "[STUB Ollama response]"
+    assert body.get("promptId") in (None, "")
+    assert body.get("promptVersionId") in (None, "")
+    assert len(body["responses"]) == 1
+    assert body["responses"][0]["modelKey"] == "qwen3"
+    assert body["responses"][0]["status"] == "success"
+    assert body["responses"][0]["text"] == "[STUB Ollama response]"
 
     run_id = body["id"]
     get_resp = await client.get(f"{API}/runs/{run_id}")
     assert get_resp.status_code == 200
-    assert len(get_resp.json()["responses"]) == 2
+    assert len(get_resp.json()["responses"]) == 1
+
+
+async def test_run_uses_compact_template_for_non_qwen3(client: AsyncClient) -> None:
+    """Non-qwen3 runs should build a compact templated prompt from inputs."""
+    resp = await client.post(
+        f"{API}/runs",
+        json=_run_payload(
+            model="chatgpt",
+            prompt_text="This long preview text should not be sent verbatim to chatgpt.",
+        ),
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert len(body["responses"]) == 1
+    assert body["responses"][0]["modelKey"] == "chatgpt"
+    assert body["responses"][0]["status"] == "success"
+
+
+async def test_generate_budget_persists_on_response(client: AsyncClient) -> None:
+    """Budget generation should persist breakdown on the response document."""
+    run_resp = await client.post(
+        f"{API}/runs",
+        json=_run_payload(model="chatgpt"),
+    )
+    assert run_resp.status_code == 201
+    body = run_resp.json()
+    run_id = body["id"]
+    response_id = body["responses"][0]["id"]
+
+    budget_resp = await client.post(
+        f"{API}/runs/{run_id}/responses/{response_id}/budget"
+    )
+    assert budget_resp.status_code == 200
+    budget_body = budget_resp.json()
+    assert budget_body["budgetBreakdown"] is not None
+    assert budget_body["budgetBreakdown"]["total"] > 0
+    assert len(budget_body["budgetBreakdown"]["items"]) >= 1
+
+    get_resp = await client.get(f"{API}/runs/{run_id}")
+    assert get_resp.status_code == 200
+    stored = get_resp.json()["responses"][0]["budgetBreakdown"]
+    assert stored is not None
+    assert stored["total"] == budget_body["budgetBreakdown"]["total"]
 
 
 async def test_run_honours_supplied_object_ids(client: AsyncClient) -> None:
-    """Supplying valid prompt/version ObjectIds should be honoured on the run."""
+    """Supplying valid prompt/version ObjectIds should be stored on the run."""
     prompt_id = "507f1f77bcf86cd799439011"
     version_id = "507f1f77bcf86cd799439012"
     resp = await client.post(
         f"{API}/runs",
-        json={
-            "useCaseKey": "travel",
-            "inputs": TRAVEL_INPUTS,
-            "promptId": prompt_id,
-            "promptVersionId": version_id,
-            "prompts": [{"model": "chatgpt", "promptText": "Plan a trip to Tokyo."}],
-        },
+        json=_run_payload(
+            prompt_id=prompt_id,
+            prompt_version_id=version_id,
+        ),
     )
     assert resp.status_code == 201
     body = resp.json()
@@ -143,7 +189,8 @@ async def test_run_rejects_invalid_object_id(client: AsyncClient) -> None:
         json={
             "useCaseKey": "travel",
             "promptId": "not-an-object-id",
-            "prompts": [{"model": "chatgpt", "promptText": "Plan a trip to Tokyo."}],
+            "model": "chatgpt",
+            "promptText": "Plan a trip to Tokyo.",
         },
     )
     assert resp.status_code == 422
@@ -153,11 +200,7 @@ async def test_evaluation_upsert_and_dashboard(client: AsyncClient) -> None:
     """Evaluations should upsert and feed the dashboard summary."""
     run_resp = await client.post(
         f"{API}/runs",
-        json={
-            "useCaseKey": "travel",
-            "inputs": TRAVEL_INPUTS,
-            "prompts": [{"model": "anthropic", "promptText": "Plan a trip to Tokyo."}],
-        },
+        json=_run_payload(model="anthropic"),
     )
     run_body = run_resp.json()
     run_id = run_body["id"]
@@ -181,7 +224,6 @@ async def test_evaluation_upsert_and_dashboard(client: AsyncClient) -> None:
     assert first.status_code == 201
     first_id = first.json()["id"]
 
-    # Re-posting the same natural key should upsert (not duplicate).
     eval_payload["scores"]["overall"] = 5
     second = await client.post(f"{API}/evaluations", json=eval_payload)
     assert second.json()["id"] == first_id

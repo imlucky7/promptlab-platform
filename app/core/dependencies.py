@@ -22,18 +22,16 @@ from app.db.repositories.prompt_versions_repo import PromptVersionsRepository
 from app.db.repositories.prompts_repo import PromptsRepository
 from app.db.repositories.responses_repo import ResponsesRepository
 from app.db.repositories.runs_repo import RunsRepository
-from app.db.repositories.use_case_templates_repo import UseCaseTemplatesRepository
 from app.services.evaluation_engine import EvaluationEngine
 from app.services.execution_engine import ExecutionEngine
 from app.services.llm_gateway_client import LLMGatewayClient
 from app.services.metrics_engine import MetricsEngine
 from app.services.ollama_client import OllamaClient
 from app.services.ollama_preview_service import OllamaPreviewService
-from app.services.prompt_builder import PromptBuilderService
 from app.services.response_normalizer import ResponseNormalizer
+from app.services.budget_service import BudgetService
 from app.services.run_service import RunService
 from app.services.suggestion_engine import SuggestionEngine
-from app.services.template_engine import TemplateEngine
 from app.services.token_estimator import TokenEstimator
 from app.services.versioning_engine import VersioningEngine
 
@@ -66,11 +64,6 @@ DbDep = Annotated[AsyncIOMotorDatabase, Depends(get_db)]
 # --------------------------------------------------------------------------- #
 # Repositories
 # --------------------------------------------------------------------------- #
-def get_templates_repo(db: DbDep) -> UseCaseTemplatesRepository:
-    """Provide the use-case templates repository."""
-    return UseCaseTemplatesRepository(db)
-
-
 def get_prompts_repo(db: DbDep) -> PromptsRepository:
     """Provide the prompts repository."""
     return PromptsRepository(db)
@@ -106,7 +99,6 @@ def get_metrics_repo(db: DbDep) -> MetricsRepository:
     return MetricsRepository(db)
 
 
-TemplatesRepoDep = Annotated[UseCaseTemplatesRepository, Depends(get_templates_repo)]
 PromptsRepoDep = Annotated[PromptsRepository, Depends(get_prompts_repo)]
 VersionsRepoDep = Annotated[PromptVersionsRepository, Depends(get_versions_repo)]
 RunsRepoDep = Annotated[RunsRepository, Depends(get_runs_repo)]
@@ -135,11 +127,6 @@ def get_gateway_client(
 GatewayDep = Annotated[LLMGatewayClient, Depends(get_gateway_client)]
 
 
-def get_template_engine(templates_repo: TemplatesRepoDep) -> TemplateEngine:
-    """Provide the template engine."""
-    return TemplateEngine(templates_repo)
-
-
 def get_token_estimator(settings: SettingsDep, gateway: GatewayDep) -> TokenEstimator:
     """Provide the token estimator."""
     return TokenEstimator(settings, gateway)
@@ -155,7 +142,6 @@ def get_response_normalizer(settings: SettingsDep) -> ResponseNormalizer:
     return ResponseNormalizer(settings)
 
 
-TemplateEngineDep = Annotated[TemplateEngine, Depends(get_template_engine)]
 TokenEstimatorDep = Annotated[TokenEstimator, Depends(get_token_estimator)]
 SuggestionEngineDep = Annotated[SuggestionEngine, Depends(get_suggestion_engine)]
 ResponseNormalizerDep = Annotated[ResponseNormalizer, Depends(get_response_normalizer)]
@@ -170,15 +156,6 @@ def get_ollama_preview_service(
 
 
 OllamaPreviewDep = Annotated[OllamaPreviewService, Depends(get_ollama_preview_service)]
-
-
-def get_prompt_builder(
-    template_engine: TemplateEngineDep,
-    token_estimator: TokenEstimatorDep,
-    suggestion_engine: SuggestionEngineDep,
-) -> PromptBuilderService:
-    """Provide the prompt builder service."""
-    return PromptBuilderService(template_engine, token_estimator, suggestion_engine)
 
 
 def get_versioning_engine(versions_repo: VersionsRepoDep) -> VersioningEngine:
@@ -201,7 +178,6 @@ def get_execution_engine(
     return ExecutionEngine(gateway, normalizer, responses_repo, metrics_repo)
 
 
-PromptBuilderDep = Annotated[PromptBuilderService, Depends(get_prompt_builder)]
 VersioningEngineDep = Annotated[VersioningEngine, Depends(get_versioning_engine)]
 EvaluationEngineDep = Annotated[EvaluationEngine, Depends(get_evaluation_engine)]
 ExecutionEngineDep = Annotated[ExecutionEngine, Depends(get_execution_engine)]
@@ -218,25 +194,31 @@ def get_metrics_engine(
 
 
 def get_run_service(
-    prompts_repo: PromptsRepoDep,
-    versions_repo: VersionsRepoDep,
     runs_repo: RunsRepoDep,
     responses_repo: ResponsesRepoDep,
     evaluations_repo: EvaluationsRepoDep,
     execution_engine: ExecutionEngineDep,
-    versioning_engine: VersioningEngineDep,
 ) -> RunService:
     """Provide the run orchestration service."""
     return RunService(
-        prompts_repo,
-        versions_repo,
         runs_repo,
         responses_repo,
         evaluations_repo,
         execution_engine,
-        versioning_engine,
     )
 
 
 MetricsEngineDep = Annotated[MetricsEngine, Depends(get_metrics_engine)]
 RunServiceDep = Annotated[RunService, Depends(get_run_service)]
+
+
+def get_budget_service(
+    runs_repo: RunsRepoDep,
+    responses_repo: ResponsesRepoDep,
+    gateway: GatewayDep,
+) -> BudgetService:
+    """Provide the budget generation service."""
+    return BudgetService(runs_repo, responses_repo, gateway)
+
+
+BudgetServiceDep = Annotated[BudgetService, Depends(get_budget_service)]

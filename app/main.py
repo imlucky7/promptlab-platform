@@ -21,7 +21,6 @@ from app.core.config import Settings, get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
 from app.db.mongo import mongo
-from app.db.seed import seed_default_templates
 
 logger = get_logger(__name__)
 
@@ -47,7 +46,6 @@ OPENAPI_TAGS: list[dict[str, Any]] = [
     {"name": "prompts", "description": "Logical prompt workspaces."},
     {"name": "prompt-versions", "description": "Versioned prompt snapshots."},
     {"name": "prompt-suggestions", "description": "Rule-based improvement suggestions."},
-    {"name": "use-case-templates", "description": "Use-case input schemas and templates."},
     {"name": "metrics-logs", "description": "Derived per-response metrics."},
     {"name": "system", "description": "Health and service metadata."},
 ]
@@ -57,8 +55,8 @@ OPENAPI_TAGS: list[dict[str, Any]] = [
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage startup and shutdown side effects.
 
-    On startup: connect to MongoDB, ensure indexes and optionally seed default
-    templates. On shutdown: close the MongoDB connection.
+    On startup: connect to MongoDB and ensure indexes. On shutdown: close the
+    MongoDB connection.
 
     Args:
         app: The FastAPI application instance.
@@ -68,8 +66,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     settings: Settings = app.state.settings
     await mongo.connect(settings)
-    if settings.seed_on_startup:
-        await seed_default_templates(mongo.get_database())
     logger.info("Application startup complete (env=%s)", settings.environment)
     try:
         yield

@@ -8,10 +8,11 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.v1.pagination import PaginationParams, build_page, pagination_params
 from app.api.v1.request_logging import log_request
-from app.core.dependencies import RunServiceDep, RunsRepoDep
+from app.core.dependencies import BudgetServiceDep, RunServiceDep, RunsRepoDep
 from app.core.errors import NotFoundError
 from app.core.logging import get_logger
 from app.models.common import MessageResponse, Page
+from app.models.responses import ResponseRead
 from app.models.runs import RunCreate, RunRead, RunUpdate, RunWithResponses
 
 logger = get_logger(__name__)
@@ -50,19 +51,17 @@ async def list_runs(
     summary="Create and execute a run",
 )
 async def create_run(payload: RunCreate, run_service: RunServiceDep) -> RunWithResponses:
-    """Execute previewed prompts, persisting the prompt, version and run.
+    """Execute a run for one model and persist the result.
 
-    The caller submits one previewed prompt per model (from ``POST /preview``);
-    each variant is sent to its model through the gateway. ``promptId`` and
-    ``promptVersionId`` may be supplied to reuse an existing prompt/version, or
-    omitted to have the system generate fresh ``ObjectId`` references.
+    qwen3 uses the previewed ``promptText`` as-is. Other models receive a compact
+    templated prompt built from ``inputs`` for token-efficient execution.
 
     Args:
-        payload: The run creation payload (per-model previewed prompts).
+        payload: The run creation payload.
         run_service: Run orchestration service.
 
     Returns:
-        The persisted run together with its per-model responses.
+        The persisted run together with its response.
     """
     return await run_service.create_and_execute(payload)
 
@@ -85,6 +84,29 @@ async def get_run(run_id: str, run_service: RunServiceDep) -> RunWithResponses:
     if result is None:
         raise NotFoundError("Run not found.", details={"id": run_id})
     return result
+
+
+@router.post(
+    "/{run_id}/responses/{response_id}/budget",
+    response_model=ResponseRead,
+    summary="Generate budget breakdown for a response",
+)
+async def generate_response_budget(
+    run_id: str,
+    response_id: str,
+    budget_service: BudgetServiceDep,
+) -> ResponseRead:
+    """Generate an itemized budget breakdown from a successful travel plan response.
+
+    Args:
+        run_id: The owning run id.
+        response_id: The response id to budget.
+        budget_service: Budget generation service.
+
+    Returns:
+        The updated response including ``budgetBreakdown``.
+    """
+    return await budget_service.generate_for_response(run_id, response_id)
 
 
 @router.patch("/{run_id}", response_model=RunRead, summary="Update run metadata")

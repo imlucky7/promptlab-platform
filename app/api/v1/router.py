@@ -18,12 +18,10 @@ from app.api.v1 import (
     routes_prompts,
     routes_responses,
     routes_runs,
-    routes_use_case_templates,
 )
 
 # Single router that composes every resource router for the v1 API.
 api_router = APIRouter()
-api_router.include_router(routes_use_case_templates.router)
 api_router.include_router(routes_prompts.router)
 api_router.include_router(routes_prompt_versions.router)
 api_router.include_router(routes_runs.router)
