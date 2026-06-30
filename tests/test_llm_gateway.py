@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from typing import Any
+
 import httpx
+import pytest
 
 from app.core.config import Settings, _default_model_catalog
 from app.services.llm_gateway_client import (
     LLMGatewayClient,
     _extract_error_detail,
     _format_gateway_error,
+    _read_response_text,
 )
 from app.services.ollama_client import OllamaClient
 
@@ -92,3 +97,77 @@ async def test_stub_token_estimate_unavailable() -> None:
     settings = Settings(llm_gateway_stub_mode=True)
     client = LLMGatewayClient(settings)
     assert await client.estimate_tokens("hello", model="gpt-4o-mini") is None
+
+
+@pytest.mark.asyncio
+async def test_read_response_text_reads_error_body() -> None:
+    """Error bodies from streaming responses should be read via aread()."""
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(
+        401,
+        request=request,
+        json={"error": {"message": "Invalid API key"}},
+    )
+
+    body = await _read_response_text(response)
+    assert "Invalid API key" in body
+    assert _format_gateway_error(
+        httpx.HTTPStatusError("Unauthorized", request=request, response=response),
+        response_text=body,
+    ).startswith("HTTP 401:")
+
+
+@pytest.mark.asyncio
+async def test_stream_http_error_returns_provider_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stream HTTP errors should not raise ResponseNotRead; surface provider detail."""
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    error_response = httpx.Response(
+        401,
+        request=request,
+        json={"error": {"message": "Invalid API key"}},
+    )
+
+    class MockStreamContext:
+        async def __aenter__(self) -> "MockStreamContext":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            raise httpx.HTTPStatusError("Unauthorized", request=request, response=error_response)
+
+        def aiter_lines(self) -> AsyncIterator[str]:
+            async def _empty() -> AsyncIterator[str]:
+                if False:
+                    yield ""
+
+            return _empty()
+
+    class MockAsyncClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "MockAsyncClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def stream(self, *_args: Any, **_kwargs: Any) -> MockStreamContext:
+            return MockStreamContext()
+
+    monkeypatch.setattr("app.services.llm_gateway_client.httpx.AsyncClient", MockAsyncClient)
+
+    settings = Settings(
+        llm_gateway_stub_mode=False,
+        openai_api_key="sk-test",
+        model_catalog=_default_model_catalog(),
+    )
+    client = LLMGatewayClient(settings)
+    result = await client.chat_completion_stream("chatgpt", "Plan a trip to Tokyo.")
+
+    assert result.status == "error"
+    assert result.error_message is not None
+    assert "Invalid API key" in result.error_message
+    assert "ResponseNotRead" not in result.error_message

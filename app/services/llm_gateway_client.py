@@ -89,22 +89,34 @@ def _extract_error_detail(response_text: str) -> str | None:
     return stripped
 
 
-def _format_gateway_error(exc: Exception) -> str:
+def _format_gateway_error(exc: Exception, *, response_text: str | None = None) -> str:
     """Format a gateway exception, preferring the provider response body.
 
     Args:
         exc: The exception raised by the HTTP client.
+        response_text: Optional pre-read body text. Required when ``exc.response``
+            came from a streaming request and has not been consumed yet.
 
     Returns:
         A descriptive error string suitable for logs and ``LLMResult.error_message``.
     """
     if isinstance(exc, httpx.HTTPStatusError):
         response = exc.response
-        detail = _extract_error_detail(response.text)
+        body_text = response_text if response_text is not None else response.text
+        detail = _extract_error_detail(body_text)
         if detail:
             return f"HTTP {response.status_code}: {detail}"
         return str(exc)
     return str(exc)
+
+
+async def _read_response_text(response: httpx.Response) -> str:
+    """Read an httpx response body as text, including unconsumed stream bodies."""
+    try:
+        content = await response.aread()
+    except Exception:
+        return ""
+    return content.decode("utf-8", errors="replace")
 
 
 def _error_raw_response(response_text: str) -> dict[str, Any]:
@@ -427,8 +439,9 @@ class LLMGatewayClient:
                     raw_response=last_raw_response or {"stream": True},
                 )
             except httpx.HTTPStatusError as exc:
-                last_error = _format_gateway_error(exc)
-                last_raw_response = _error_raw_response(exc.response.text)
+                response_text = await _read_response_text(exc.response)
+                last_error = _format_gateway_error(exc, response_text=response_text)
+                last_raw_response = _error_raw_response(response_text)
                 logger.warning(
                     "Gateway stream failed for model '%s' (attempt %d/%d): %s",
                     model_key,
