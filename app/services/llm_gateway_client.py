@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,6 +27,8 @@ from app.services.ollama_client import OllamaClient, OllamaError
 
 logger = get_logger(__name__)
 _MAX_ERROR_BODY_CHARS = 2000
+
+TokenCallback = Callable[[str], Awaitable[None]]
 
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:
@@ -226,6 +229,237 @@ class LLMGatewayClient:
 
         return await self._remote_completion(
             model_key, provider_model_name, gateway_identifier, base_url, api_key, payload
+        )
+
+    async def chat_completion_stream(
+        self,
+        model_key: str,
+        prompt_text: str,
+        *,
+        on_token: TokenCallback | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 1500,
+    ) -> LLMResult:
+        """Execute a streaming chat completion, invoking ``on_token`` for each delta."""
+        model_cfg = self._settings.get_model_config(model_key)
+        provider_model_name = model_cfg.provider_model_name if model_cfg else model_key
+        gateway_identifier = model_cfg.gateway_model_identifier if model_cfg else model_key
+
+        if self._settings.is_ollama_model(model_key):
+            return await self._ollama_completion_stream(
+                model_key, provider_model_name, gateway_identifier, prompt_text, on_token=on_token
+            )
+
+        direct_target = self._settings.resolve_provider_target(model_cfg)
+        if direct_target is not None:
+            base_url, api_key = direct_target
+            model_id = provider_model_name
+        else:
+            base_url = self._settings.llm_gateway_base_url or ""
+            api_key = self._settings.llm_gateway_api_key
+            model_id = gateway_identifier
+
+        payload: dict[str, Any] = {
+            "model": model_id,
+            "messages": [{"role": "user", "content": prompt_text}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+
+        if self._settings.is_model_stubbed(model_key):
+            return await self._stub_completion_stream(
+                model_key, provider_model_name, gateway_identifier, prompt_text, payload, on_token
+            )
+
+        return await self._remote_completion_stream(
+            model_key,
+            provider_model_name,
+            gateway_identifier,
+            base_url,
+            api_key,
+            payload,
+            on_token,
+        )
+
+    async def _ollama_completion_stream(
+        self,
+        model_key: str,
+        provider_model_name: str,
+        gateway_identifier: str,
+        prompt_text: str,
+        *,
+        on_token: TokenCallback | None = None,
+    ) -> LLMResult:
+        """Execute a streaming completion via the local Ollama client."""
+        payload: dict[str, Any] = {
+            "model": provider_model_name,
+            "prompt": prompt_text,
+        }
+        if self._ollama is None:
+            return LLMResult(
+                model_key=model_key,
+                provider_model_name=provider_model_name,
+                gateway_model_identifier=gateway_identifier,
+                status="error",
+                error_message="Ollama client is not configured",
+                prompt_payload=payload,
+            )
+
+        start = time.perf_counter()
+        parts: list[str] = []
+        try:
+            async for chunk in self._ollama.generate_stream(prompt_text):
+                parts.append(chunk)
+                if on_token is not None:
+                    await on_token(chunk)
+            text = "".join(parts)
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            input_tokens = max(1, len(prompt_text) // 4)
+            output_tokens = max(1, len(text) // 4)
+            return LLMResult(
+                model_key=model_key,
+                provider_model_name=provider_model_name,
+                gateway_model_identifier=gateway_identifier,
+                text=text,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                latency_ms=latency_ms,
+                status="success",
+                prompt_payload=payload,
+                raw_response={"ollama": True, "model": provider_model_name, "stream": True},
+            )
+        except OllamaError as exc:
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            logger.warning("Ollama stream completion failed for model '%s': %s", model_key, exc)
+            return LLMResult(
+                model_key=model_key,
+                provider_model_name=provider_model_name,
+                gateway_model_identifier=gateway_identifier,
+                status="error",
+                error_message=str(exc),
+                latency_ms=latency_ms,
+                prompt_payload=payload,
+            )
+
+    async def _stub_completion_stream(
+        self,
+        model_key: str,
+        provider_model_name: str,
+        gateway_identifier: str,
+        prompt_text: str,
+        payload: dict[str, Any],
+        on_token: TokenCallback | None,
+    ) -> LLMResult:
+        """Stream a deterministic stub response in fixed-size chunks."""
+        result = self._stub_completion(
+            model_key, provider_model_name, gateway_identifier, prompt_text, payload
+        )
+        chunk_size = 32
+        for index in range(0, len(result.text), chunk_size):
+            chunk = result.text[index : index + chunk_size]
+            if on_token is not None:
+                await on_token(chunk)
+        return result
+
+    async def _remote_completion_stream(
+        self,
+        model_key: str,
+        provider_model_name: str,
+        gateway_identifier: str,
+        base_url: str,
+        api_key: str | None,
+        payload: dict[str, Any],
+        on_token: TokenCallback | None,
+    ) -> LLMResult:
+        """Perform a streaming HTTP call with retry/backoff."""
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        headers = self._auth_headers(api_key)
+        attempts = self._settings.llm_gateway_max_retries + 1
+        last_error: str | None = None
+        last_raw_response: dict[str, Any] = {}
+        start = time.perf_counter()
+
+        for attempt in range(1, attempts + 1):
+            text_parts: list[str] = []
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self._settings.llm_gateway_timeout_seconds
+                ) as client:
+                    async with client.stream("POST", url, json=payload, headers=headers) as resp:
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[len("data:") :].strip()
+                            if not data or data == "[DONE]":
+                                continue
+                            try:
+                                chunk = json.loads(data)
+                            except json.JSONDecodeError:
+                                continue
+                            choices = chunk.get("choices") or []
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta") or {}
+                            content = delta.get("content")
+                            if isinstance(content, str) and content:
+                                text_parts.append(content)
+                                if on_token is not None:
+                                    await on_token(content)
+                            if choices[0].get("finish_reason"):
+                                last_raw_response = chunk
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                text = "".join(text_parts)
+                prompt_content = str(payload["messages"][0]["content"])
+                input_tokens = max(1, len(prompt_content) // 4)
+                output_tokens = max(1, len(text) // 4)
+                return LLMResult(
+                    model_key=model_key,
+                    provider_model_name=provider_model_name,
+                    gateway_model_identifier=gateway_identifier,
+                    text=text,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    latency_ms=latency_ms,
+                    status="success",
+                    prompt_payload=payload,
+                    raw_response=last_raw_response or {"stream": True},
+                )
+            except httpx.HTTPStatusError as exc:
+                last_error = _format_gateway_error(exc)
+                last_raw_response = _error_raw_response(exc.response.text)
+                logger.warning(
+                    "Gateway stream failed for model '%s' (attempt %d/%d): %s",
+                    model_key,
+                    attempt,
+                    attempts,
+                    last_error,
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "Gateway stream failed for model '%s' (attempt %d/%d): %s",
+                    model_key,
+                    attempt,
+                    attempts,
+                    exc,
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
+
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        return LLMResult(
+            model_key=model_key,
+            provider_model_name=provider_model_name,
+            gateway_model_identifier=gateway_identifier,
+            status="error",
+            error_message=last_error or "Unknown gateway error",
+            latency_ms=latency_ms,
+            prompt_payload=payload,
+            raw_response=last_raw_response,
         )
 
     async def _ollama_completion(

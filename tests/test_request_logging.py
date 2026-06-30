@@ -6,8 +6,10 @@ import logging
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from starlette.requests import Request
+from starlette.responses import StreamingResponse
 
-from app.api.v1.request_logging import truncate_for_log
+from app.api.v1.request_logging import log_response_middleware, truncate_for_log
 from app.core.config import Settings
 from app.core.dependencies import get_app_settings, get_db
 from app.main import create_app
@@ -80,3 +82,32 @@ async def test_response_middleware_skips_non_v1(
     assert not any("Outgoing response:" in record.message for record in caplog.records)
 
     app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_response_middleware_passthrough_event_stream() -> None:
+    """SSE responses must not be buffered by response logging middleware."""
+
+    async def stream_body():
+        yield b"event: progress\ndata: {\"type\":\"progress\"}\n\n"
+
+    async def call_next(_request: Request) -> StreamingResponse:
+        return StreamingResponse(stream_body(), media_type="text/event-stream")
+
+    middleware = log_response_middleware("/api/v1")
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v1/preview/stream",
+        "headers": [],
+        "query_string": b"",
+    }
+    request = Request(scope)
+
+    response = await middleware(request, call_next)
+    assert response is not None
+    assert "text/event-stream" in (response.media_type or "")
+
+    chunks = [chunk async for chunk in response.body_iterator]
+    assert chunks == [b"event: progress\ndata: {\"type\":\"progress\"}\n\n"]

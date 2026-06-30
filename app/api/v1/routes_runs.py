@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.v1.pagination import PaginationParams, build_page, pagination_params
 from app.api.v1.request_logging import log_request
+from app.api.v1.streaming import sse_streaming_response
 from app.core.dependencies import BudgetServiceDep, RunServiceDep, RunsRepoDep
 from app.core.errors import NotFoundError
 from app.core.logging import get_logger
@@ -64,6 +65,17 @@ async def create_run(payload: RunCreate, run_service: RunServiceDep) -> RunWithR
         The persisted run together with its response.
     """
     return await run_service.create_and_execute(payload)
+
+
+@router.post("/stream", summary="Create and execute a run (streaming)")
+async def create_run_stream(payload: RunCreate, run_service: RunServiceDep):
+    """Stream run progress, model output tokens, and the final run payload."""
+
+    async def event_generator():
+        async for event in run_service.create_and_execute_stream(payload):
+            yield event
+
+    return sse_streaming_response(event_generator())
 
 
 @router.get("/{run_id}", response_model=RunWithResponses, summary="Get a run with responses")

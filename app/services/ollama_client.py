@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -118,6 +119,88 @@ class OllamaClient:
         if not isinstance(text, str):
             raise OllamaError("Ollama response missing the 'response' field.")
         return text
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        response_format: dict[str, Any] | str | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream text chunks via ``POST /api/generate`` with ``stream: true``.
+
+        Args:
+            prompt: User prompt text.
+            system: Optional system prompt.
+            response_format: Optional Ollama ``format`` (``"json"`` or JSON schema).
+
+        Yields:
+            Incremental ``response`` field fragments from Ollama.
+
+        Raises:
+            OllamaError: On network, HTTP, or parse failures.
+        """
+        if self._stub_mode:
+            text = self._stub_response(prompt, response_format)
+            chunk_size = 24
+            for index in range(0, len(text), chunk_size):
+                yield text[index : index + chunk_size]
+            return
+
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "prompt": prompt,
+            "stream": True,
+        }
+        if system:
+            payload["system"] = system
+        if response_format is not None:
+            payload["format"] = response_format
+
+        url = f"{self._base_url}/api/generate"
+        start = time.perf_counter()
+        logger.info("Ollama stream request url=%s payload=%s", url, json.dumps(payload))
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                async with client.stream("POST", url, json=payload) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            body = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise OllamaError("Ollama stream returned invalid JSON.") from exc
+                        chunk = body.get("response")
+                        if isinstance(chunk, str) and chunk:
+                            yield chunk
+                        if body.get("done"):
+                            break
+        except httpx.HTTPStatusError as exc:
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            detail = exc.response.text.strip() or str(exc)
+            logger.warning(
+                "Ollama stream HTTP error url=%s latency_ms=%s error=%s",
+                url,
+                latency_ms,
+                detail[:500],
+            )
+            raise OllamaError(f"Ollama returned HTTP {exc.response.status_code}: {detail}") from exc
+        except httpx.RequestError as exc:
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            logger.warning(
+                "Ollama stream request failed url=%s latency_ms=%s error=%s",
+                url,
+                latency_ms,
+                exc,
+            )
+            raise OllamaError(
+                f"Could not reach Ollama at {self._base_url}. "
+                "Ensure Ollama is running and the model is pulled."
+            ) from exc
+
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        logger.info("Ollama stream completed url=%s latency_ms=%s", url, latency_ms)
 
     def _stub_response(
         self, prompt: str, response_format: dict[str, Any] | str | None

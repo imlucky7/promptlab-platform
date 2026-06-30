@@ -62,6 +62,25 @@ def log_response_middleware(
             return await call_next(request)
 
         response = await call_next(request)
+        content_type = (response.headers.get("content-type") or response.media_type or "").lower()
+        if "text/event-stream" in content_type:
+            log_payload = {
+                "method": request.method,
+                "path": request.url.path,
+                "statusCode": response.status_code,
+                "body": "<streaming response>",
+            }
+            _response_logger.info(
+                "Outgoing response:\n%s",
+                json.dumps(
+                    truncate_for_log(log_payload),
+                    indent=2,
+                    default=str,
+                    sort_keys=True,
+                ),
+            )
+            return response
+
         body = b"".join([chunk async for chunk in response.body_iterator])
 
         log_payload: dict[str, object] = {

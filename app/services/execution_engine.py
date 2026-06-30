@@ -15,7 +15,7 @@ from typing import Any
 from app.core.logging import get_logger
 from app.db.repositories.metrics_repo import MetricsRepository
 from app.db.repositories.responses_repo import ResponsesRepository
-from app.services.llm_gateway_client import LLMGatewayClient, LLMResult
+from app.services.llm_gateway_client import LLMGatewayClient, LLMResult, TokenCallback
 from app.services.response_normalizer import ResponseNormalizer
 
 logger = get_logger(__name__)
@@ -111,6 +111,8 @@ class ExecutionEngine:
         self,
         run_id: str,
         model_prompts: list[tuple[str, str]],
+        *,
+        on_token: TokenCallback | None = None,
     ) -> list[dict[str, Any]]:
         """Execute each model with its own prompt and persist results.
 
@@ -135,7 +137,7 @@ class ExecutionEngine:
         # Fire all gateway calls concurrently. Exceptions are returned (not
         # raised) so a single failure does not abort the gather.
         tasks = [
-            self._invoke_model(run_id, model_key, prompt_text)
+            self._invoke_model(run_id, model_key, prompt_text, on_token=on_token)
             for model_key, prompt_text in model_prompts
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -173,7 +175,14 @@ class ExecutionEngine:
 
         return persisted
 
-    async def _invoke_model(self, run_id: str, model_key: str, prompt_text: str) -> LLMResult:
+    async def _invoke_model(
+        self,
+        run_id: str,
+        model_key: str,
+        prompt_text: str,
+        *,
+        on_token: TokenCallback | None = None,
+    ) -> LLMResult:
         """Call the gateway for one model and log the request/response.
 
         Args:
@@ -193,7 +202,12 @@ class ExecutionEngine:
                 sort_keys=True,
             ),
         )
-        result = await self._gateway.chat_completion(model_key, prompt_text)
+        if on_token is not None:
+            result = await self._gateway.chat_completion_stream(
+                model_key, prompt_text, on_token=on_token
+            )
+        else:
+            result = await self._gateway.chat_completion(model_key, prompt_text)
         payload = _llm_result_payload(run_id, result)
         if result.status == "error":
             logger.error(

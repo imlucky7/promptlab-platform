@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import AsyncIterator
 from datetime import date, datetime
 from typing import Any, cast
 
 from app.core.logging import get_logger
 from app.models.preview import PreviewResponse, TemplatePreview
 from app.models.prompt_suggestions import SuggestionItem, SuggestionType
-from app.services.ollama_client import OllamaClient, OllamaError
+from app.models.stream import complete_event, progress_event, token_event
+from app.services.ollama_client import OllamaClient
 from app.services.token_estimator import TokenEstimator
 
 logger = get_logger(__name__)
@@ -120,6 +122,68 @@ class OllamaPreviewService:
             previews=previews,
             latency_ms=latency_ms,
         )
+
+    async def preview_stream(
+        self,
+        use_case_key: str,
+        structured_inputs: dict[str, Any],
+        *,
+        models: list[str] | None = None,
+        token_estimation_mode: str = "default",
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream preview progress, draft tokens, and the final preview payload."""
+        started = time.perf_counter()
+        trip_context = map_structured_inputs_to_trip_context(structured_inputs)
+        context_json = json.dumps(trip_context, indent=2)
+
+        yield progress_event("generating_draft", "Drafting prompt…")
+        draft_parts: list[str] = []
+        async for chunk in self._ollama.generate_stream(
+            f"Trip context JSON:\n{context_json}\n\nWrite the travel planning prompt.",
+            system=_GENERATE_SYSTEM,
+        ):
+            draft_parts.append(chunk)
+            yield token_event("preview", chunk)
+        draft_prompt = "".join(draft_parts)
+
+        yield progress_event("optimizing", "Optimizing prompt…")
+        optimize_raw = await self._ollama.generate(
+            (
+                f"Trip context JSON:\n{context_json}\n\n"
+                f"Draft prompt:\n{draft_prompt}\n\n"
+                "Optimize the prompt and list missing details the user should add."
+            ),
+            system=_OPTIMIZE_SYSTEM,
+            response_format=_OPTIMIZE_FORMAT,
+        )
+
+        optimized_prompt, suggestions = parse_optimize_response(optimize_raw, draft_prompt)
+
+        yield progress_event("estimating_tokens", "Estimating tokens…")
+        token_estimates = await self._token_estimator.estimate(
+            optimized_prompt, mode_override=token_estimation_mode
+        )
+
+        model_keys = models if models else [DEFAULT_PREVIEW_MODEL]
+        previews = [
+            TemplatePreview(
+                model=model,
+                template_name=_PREVIEW_TEMPLATE_NAME,
+                prompt_text=optimized_prompt,
+                token_estimates=token_estimates,
+                suggestions=suggestions,
+            )
+            for model in model_keys
+        ]
+
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        response = PreviewResponse(
+            use_case_key=use_case_key,
+            structured_inputs=structured_inputs,
+            previews=previews,
+            latency_ms=latency_ms,
+        )
+        yield complete_event(response)
 
 
 def map_structured_inputs_to_trip_context(
